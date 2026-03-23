@@ -20,6 +20,8 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use crate::branding;
 use crate::config::AppConfig;
+#[cfg(target_os = "windows")]
+use crate::paths::AppPaths;
 use crate::platform::run_elevated;
 #[cfg(target_os = "linux")]
 use crate::platform::spawn_detached;
@@ -185,7 +187,7 @@ impl AcceleratorApp {
         let config = AppConfig::load_or_create(&config_path).unwrap_or_default();
         let status = service::status(Some(config_path.clone())).unwrap_or_default();
         #[cfg(target_os = "windows")]
-        let _ = sync_windows_shortcut_icon(&config_path);
+        schedule_windows_shortcut_icon_refresh(&config_path);
         let logo = cc.egui_ctx.load_texture(
             "linuxdo-logo",
             branding::logo_image(96),
@@ -1227,8 +1229,29 @@ fn capture_native_window_handle(cc: &eframe::CreationContext<'_>) -> Option<isiz
 }
 
 #[cfg(target_os = "windows")]
-fn sync_windows_shortcut_icon(config_path: &Path) -> Result<()> {
-    let _ = config_path;
-    let current_exe = std::env::current_exe().context("failed to locate current executable")?;
-    update_windows_shortcuts_for_exe(&current_exe)
+fn schedule_windows_shortcut_icon_refresh(config_path: &Path) {
+    let result = (|| -> Result<()> {
+        let current_exe = std::env::current_exe().context("failed to locate current executable")?;
+        let paths = AppPaths::resolve(Some(config_path.to_path_buf()))?;
+        std::fs::create_dir_all(&paths.runtime_dir)
+            .with_context(|| format!("failed to create {}", paths.runtime_dir.display()))?;
+
+        let stamp_path = paths.runtime_dir.join("windows-shortcut-icon-sync.txt");
+        let stamp = format!("{}\n{}", env!("CARGO_PKG_VERSION"), current_exe.display());
+        if std::fs::read_to_string(&stamp_path).ok().as_deref() == Some(stamp.as_str()) {
+            return Ok(());
+        }
+
+        thread::spawn(move || {
+            if update_windows_shortcuts_for_exe(&current_exe).is_ok() {
+                let _ = std::fs::write(&stamp_path, stamp);
+            }
+        });
+        Ok(())
+    })();
+
+    let _ = result;
 }
+
+#[cfg(not(target_os = "windows"))]
+fn schedule_windows_shortcut_icon_refresh(_config_path: &Path) {}
