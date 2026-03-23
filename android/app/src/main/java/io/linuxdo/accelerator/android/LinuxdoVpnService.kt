@@ -69,7 +69,9 @@ class LinuxdoVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopAccelerator("服务已销毁")
+        if (running.get() || vpnInterface != null) {
+            stopAccelerator("服务已销毁")
+        }
         super.onDestroy()
     }
 
@@ -354,6 +356,21 @@ class LinuxdoVpnService : VpnService() {
                         .apply()
                 }
                 return Triple(true, status, detail)
+            }
+
+            if (!savedRunning && savedStatus == "服务已销毁") {
+                val status = "已停止"
+                val detail = if (savedDetail.isBlank()) {
+                    "Android VPN DNS 接管已关闭。"
+                } else {
+                    savedDetail
+                }
+                prefs.edit()
+                    .putBoolean(PREF_RUNNING, false)
+                    .putString(PREF_STATUS, status)
+                    .putString(PREF_DETAIL, detail)
+                    .apply()
+                return Triple(false, status, detail)
             }
 
             if (!savedRunning) {

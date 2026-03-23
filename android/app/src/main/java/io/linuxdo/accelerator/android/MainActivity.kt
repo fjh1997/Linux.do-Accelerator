@@ -99,9 +99,10 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         registerStatusReceiver()
         val (running, status, detail) = LinuxdoVpnService.readCurrentStatus(this)
+        val normalizedStatus = if (!running && status == "服务已销毁") "已停止" else status
         renderState(
             running,
-            status,
+            normalizedStatus,
             if (detail.isBlank()) {
                 "配置文件和 Android 壳已就绪，点击开始加速后会申请 VPN 权限，并强制通过自定义 DoH 接管 linux.do 相关 DNS。"
             } else {
