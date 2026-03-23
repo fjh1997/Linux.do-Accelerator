@@ -35,6 +35,7 @@ use crate::state::ServiceState;
 
 const APP_WINDOW_TITLE: &str = "Linux.do Accelerator";
 const APP_ID: &str = "linuxdo-accelerator";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn run(config_path: PathBuf) -> Result<()> {
     let native_options = eframe::NativeOptions {
@@ -525,6 +526,12 @@ impl eframe::App for AcceleratorApp {
                                         .color(egui::Color32::from_rgb(247, 247, 243)),
                                 );
                                 ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new(format!("v{APP_VERSION}"))
+                                        .font(FontId::proportional(11.5))
+                                        .color(egui::Color32::from_rgb(157, 168, 177)),
+                                );
+                                ui.add_space(6.0);
                                 egui::Frame::new()
                                     .fill(accent.linear_multiply(0.18))
                                     .stroke(egui::Stroke::new(1.0, accent.linear_multiply(0.75)))
@@ -786,6 +793,7 @@ impl eframe::App for AcceleratorApp {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.add(egui::Image::new((self.logo.id(), egui::vec2(42.0, 42.0))));
                         ui.label(RichText::new("Linux.do Accelerator").strong());
+                        ui.label(format!("版本 v{APP_VERSION}"));
                         ui.label("原生 Rust 桌面壳 + CLI");
                         ui.label("支持证书安装、hosts 接管和本地 80/443 监听");
                         ui.label("DoH 与子域支持列表统一放在 linuxdo-accelerator.toml");

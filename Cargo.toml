@@ -1,11 +1,46 @@
 [package]
 name = "linuxdo-accelerator"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 build = "build.rs"
 authors = ["fjh1997 <549308442@qq.com>"]
 license = "MIT"
 description = "Native Rust linux.do accelerator with CLI and desktop shell"
+
+[package.metadata.packager]
+product-name = "Linux.do Accelerator"
+identifier = "io.linuxdo.accelerator"
+out-dir = "./dist"
+binaries-dir = "./target/release"
+formats = ["deb", "dmg", "nsis"]
+before-packaging-command = "cargo build --release --bin linuxdo-accelerator"
+publisher = "linux.do"
+description = "Native Rust linux.do accelerator desktop app"
+long-description = """
+A native Rust linux.do accelerator with one unified executable.
+The same binary supports desktop GUI and CLI modes depending on the command-line arguments.
+"""
+category = "DeveloperTool"
+icons = ["assets/icons/linuxdo.ico", "assets/icons/*.png"]
+
+[[package.metadata.packager.binaries]]
+path = "linuxdo-accelerator"
+main = true
+
+[package.metadata.packager.linux]
+generate-desktop-entry = true
+
+[package.metadata.packager.macos]
+signing-identity = "-"
+
+[package.metadata.packager.deb]
+section = "utils"
+package-name = "linuxdo-accelerator"
+desktop-template = "packaging/linux/linuxdo-accelerator.desktop.hbs"
+
+[package.metadata.packager.nsis]
+installer-mode = "perMachine"
+installer-icon = "assets/icons/linuxdo.ico"
 
 [dependencies]
 anyhow = "1"

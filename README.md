@@ -199,7 +199,7 @@ Android 版当前单独打包为 APK：
 
 ## Packaging
 
-项目使用 [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager) 和 [`Packager.toml`](./Packager.toml)：
+项目使用 [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager)，打包配置直接写在 [`Cargo.toml`](./Cargo.toml) 的 `[package.metadata.packager]` 下：
 
 - Windows：`NSIS .exe`，同时输出 `x64` 和 `arm64` 两个变体
 - Linux：`.deb`，同时输出 `amd64` 和 `arm64` 两个变体
@@ -210,13 +210,13 @@ Android 版当前单独打包为 APK：
 
 ```bash
 cargo install cargo-packager --locked
-cargo packager --release -c Packager.toml
+cargo packager --release
 ```
 
 只打 Linux `deb`：
 
 ```bash
-cargo packager -f deb --release -c Packager.toml
+cargo packager -f deb --release
 ```
 
 macOS 安装提示：

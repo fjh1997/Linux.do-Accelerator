@@ -17,22 +17,22 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: linux-x64
-            package_cmd: cargo packager -f deb -c Packager.toml
+            package_cmd: cargo packager -f deb
           - os: ubuntu-24.04-arm
             artifact_name: linux-arm64
-            package_cmd: cargo packager -f deb -c Packager.toml
+            package_cmd: cargo packager -f deb
           - os: windows-latest
             artifact_name: windows-x64
-            package_cmd: cargo packager -f nsis -c Packager.toml
+            package_cmd: cargo packager -f nsis
           - os: windows-11-arm
             artifact_name: windows-arm64
-            package_cmd: cargo packager -f nsis -c Packager.toml
+            package_cmd: cargo packager -f nsis
           - os: macos-15
             artifact_name: macos-arm64
-            package_cmd: cargo packager -f dmg -c Packager.toml
+            package_cmd: cargo packager -f dmg
           - os: macos-15-intel
             artifact_name: macos-intel
-            package_cmd: cargo packager -f dmg -c Packager.toml
+            package_cmd: cargo packager -f dmg
 
     runs-on: ${{ matrix.os }}
     name: Build ${{ matrix.artifact_name }}
