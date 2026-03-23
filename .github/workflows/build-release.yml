@@ -16,10 +16,16 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: linux
+            artifact_name: linux-x64
+            package_cmd: cargo packager -f deb -c Packager.toml
+          - os: ubuntu-24.04-arm
+            artifact_name: linux-arm64
             package_cmd: cargo packager -f deb -c Packager.toml
           - os: windows-latest
-            artifact_name: windows
+            artifact_name: windows-x64
+            package_cmd: cargo packager -f nsis -c Packager.toml
+          - os: windows-11-arm
+            artifact_name: windows-arm64
             package_cmd: cargo packager -f nsis -c Packager.toml
           - os: macos-15
             artifact_name: macos-arm64

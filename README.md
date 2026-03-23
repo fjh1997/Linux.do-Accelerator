@@ -176,8 +176,8 @@ server_common_name = "linux.do"
 
 项目使用 [`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager) 和 [`Packager.toml`](./Packager.toml)：
 
-- Windows：`NSIS .exe`
-- Linux：`.deb`
+- Windows：`NSIS .exe`，同时输出 `x64` 和 `arm64` 两个变体
+- Linux：`.deb`，同时输出 `amd64` 和 `arm64` 两个变体
 - macOS：`.dmg`，同时输出 `Apple Silicon (arm64)` 和 `Intel (x64)` 两个变体
 
 本地打包：
@@ -204,7 +204,9 @@ macOS 安装提示：
 macOS 不再走本地交叉编译脚本，而是通过 GitHub Actions 原生构建：
 
 - Linux runner：生成 `.deb`
-- Windows runner：生成 `NSIS .exe`
+- Linux ARM runner：生成 `arm64 .deb`
+- Windows runner：生成 `x64 NSIS .exe`
+- Windows ARM runner：生成 `arm64 NSIS .exe`
 - macOS ARM runner：生成 `arm64 .dmg`
 - macOS Intel runner：生成 `x64 .dmg`
 
