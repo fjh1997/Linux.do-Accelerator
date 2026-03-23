@@ -13,8 +13,10 @@ import java.net.InetAddress
 import java.net.URL
 import java.util.Base64
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import android.util.Log
+import android.os.SystemClock
 
 data class ParsedDnsQuery(
     val id: Int,
@@ -35,6 +37,16 @@ data class DnsResolution(
     val responseCode: Int = 0,
 )
 
+data class CachedDnsResolution(
+    val resolution: DnsResolution,
+    val expiresAtMs: Long,
+)
+
+data class DnsCacheKey(
+    val host: String,
+    val type: Int,
+)
+
 data class PreparedDohEndpoint(
     val rawUrl: String,
     val host: String,
@@ -47,6 +59,7 @@ class LinuxdoDnsResolver(
     endpoints: List<PreparedDohEndpoint>,
 ) {
     private val tag = "LinuxdoDnsResolver"
+    private val cache = ConcurrentHashMap<DnsCacheKey, CachedDnsResolution>()
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(10, TimeUnit.SECONDS)
@@ -57,25 +70,34 @@ class LinuxdoDnsResolver(
 
     fun resolveManagedPayload(requestPayload: ByteArray, query: ParsedDnsQuery): ByteArray {
         val host = query.name.lowercase(Locale.US)
+        readCached(host, query.type)?.let { cached ->
+            Log.d(tag, "cache hit for $host type=${query.type} answers=${cached.answers.size}")
+            return DnsPacketCodec.buildResponse(query, cached)
+        }
+
         resolveLocal(host, query.type)?.let { answers ->
+            val resolution = DnsResolution(answers)
+            writeCache(host, query.type, resolution)
             Log.d(tag, "resolved local override for $host type=${query.type} answers=${answers.size}")
-            return DnsPacketCodec.buildResponse(query, DnsResolution(answers))
+            return DnsPacketCodec.buildResponse(query, resolution)
         }
 
         var lastError: Exception? = null
         for (endpoint in preparedEndpoints) {
             try {
                 if (supportsDnsMessage(endpoint.url)) {
-                    val payload = queryDohDnsMessageRaw(endpoint, requestPayload)
+                    val resolution = queryDohDnsMessageRaw(endpoint, requestPayload, query)
+                    writeCache(host, query.type, resolution)
                     Log.d(tag, "resolved $host type=${query.type} via ${endpoint.rawUrl} raw dns-message")
-                    return payload
+                    return DnsPacketCodec.buildResponse(query, resolution)
                 }
 
                 if (isJsonFriendlyType(query.type)) {
-                    val answers = queryDohJson(endpoint, host, query.type)
-                    if (answers.isNotEmpty()) {
-                        Log.d(tag, "resolved $host type=${query.type} via ${endpoint.rawUrl} answers=${answers.size}")
-                        return DnsPacketCodec.buildResponse(query, DnsResolution(answers))
+                    val resolution = DnsResolution(queryDohJson(endpoint, host, query.type))
+                    if (resolution.answers.isNotEmpty()) {
+                        writeCache(host, query.type, resolution)
+                        Log.d(tag, "resolved $host type=${query.type} via ${endpoint.rawUrl} answers=${resolution.answers.size}")
+                        return DnsPacketCodec.buildResponse(query, resolution)
                     }
                     lastError = IOException("empty answer from ${endpoint.rawUrl}")
                     continue
@@ -97,8 +119,17 @@ class LinuxdoDnsResolver(
         }
 
         val host = query.name.lowercase(Locale.US)
+        readCached(host, query.type)?.let {
+            Log.d(tag, "cache hit for $host type=${query.type} answers=${it.answers.size}")
+            return it
+        }
+
         val managedHost = config.isManagedHost(host)
-        resolveLocal(host, query.type)?.let { return DnsResolution(it) }
+        resolveLocal(host, query.type)?.let {
+            val resolution = DnsResolution(it)
+            writeCache(host, query.type, resolution)
+            return resolution
+        }
 
         val endpoints = if (managedHost) {
             preparedEndpoints
@@ -109,10 +140,11 @@ class LinuxdoDnsResolver(
         var lastError: Exception? = null
         for (endpoint in endpoints) {
             try {
-                val answers = queryDoh(endpoint, host, query.type)
-                if (answers.isNotEmpty()) {
-                    Log.d(tag, "resolved $host type=${query.type} via ${endpoint.rawUrl} answers=${answers.size}")
-                    return DnsResolution(answers)
+                val resolution = DnsResolution(queryDoh(endpoint, host, query.type))
+                if (resolution.answers.isNotEmpty()) {
+                    writeCache(host, query.type, resolution)
+                    Log.d(tag, "resolved $host type=${query.type} via ${endpoint.rawUrl} answers=${resolution.answers.size}")
+                    return resolution
                 }
                 lastError = IOException("empty answer from ${endpoint.rawUrl}")
             } catch (error: Exception) {
@@ -123,6 +155,7 @@ class LinuxdoDnsResolver(
 
         throw IOException("DoH lookup failed for $host: ${lastError?.message ?: "no endpoint available"}")
     }
+
     private fun resolveLocal(host: String, type: Int): List<DnsAnswerRecord>? {
         config.findDnsHostOverride(host)?.let { override ->
             return resolveOverride(override, type)
@@ -256,7 +289,8 @@ class LinuxdoDnsResolver(
     private fun queryDohDnsMessageRaw(
         endpoint: PreparedDohEndpoint,
         payload: ByteArray,
-    ): ByteArray {
+        query: ParsedDnsQuery,
+    ): DnsResolution {
         val encoded = Base64.getUrlEncoder()
             .withoutPadding()
             .encodeToString(payload)
@@ -272,8 +306,32 @@ class LinuxdoDnsResolver(
             if (!response.isSuccessful) {
                 throw IOException("DoH server ${endpoint.rawUrl} returned ${response.code}")
             }
-            return response.body?.bytes() ?: throw IOException("empty DoH response from ${endpoint.rawUrl}")
+            val body = response.body?.bytes() ?: throw IOException("empty DoH response from ${endpoint.rawUrl}")
+            return DnsResolution(DnsPacketCodec.parseWireResponse(body, query.type))
         }
+    }
+
+    private fun readCached(host: String, type: Int): DnsResolution? {
+        val key = DnsCacheKey(host, type)
+        val entry = cache[key] ?: return null
+        if (SystemClock.elapsedRealtime() >= entry.expiresAtMs) {
+            cache.remove(key)
+            return null
+        }
+        return entry.resolution
+    }
+
+    private fun writeCache(host: String, type: Int, resolution: DnsResolution) {
+        val minTtl = resolution.answers.minOfOrNull { it.ttl } ?: return
+        if (minTtl <= 0) {
+            cache.remove(DnsCacheKey(host, type))
+            return
+        }
+        cache.entries.removeIf { (_, entry) -> SystemClock.elapsedRealtime() >= entry.expiresAtMs }
+        cache[DnsCacheKey(host, type)] = CachedDnsResolution(
+            resolution = resolution,
+            expiresAtMs = SystemClock.elapsedRealtime() + (minTtl.toLong() * 1000L),
+        )
     }
 
     private fun supportsDnsMessage(url: URL): Boolean {

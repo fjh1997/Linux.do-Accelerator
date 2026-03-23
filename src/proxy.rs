@@ -41,6 +41,7 @@ struct AppState {
     config: AppConfig,
     doh_client: Client,
     resolve_cache: RwLock<HashMap<ResolveCacheKey, CachedResolvedUpstream>>,
+    doh_cache: RwLock<HashMap<DohCacheKey, CachedDohAnswers>>,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +59,18 @@ struct ResolveCacheKey {
 #[derive(Clone)]
 struct CachedResolvedUpstream {
     upstream: ResolvedUpstream,
+    expires_at: Instant,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct DohCacheKey {
+    host: String,
+    record_type: String,
+}
+
+#[derive(Clone, Debug)]
+struct CachedDohAnswers {
+    answers: Vec<DohAnswer>,
     expires_at: Instant,
 }
 
@@ -81,10 +94,11 @@ struct DohJsonResponse {
 struct DohAnswer {
     #[serde(rename = "type")]
     record_type: u16,
+    #[serde(rename = "TTL")]
+    ttl: Option<u32>,
     data: String,
 }
-
-const RESOLVE_CACHE_TTL: Duration = Duration::from_secs(300);
+const FALLBACK_RESOLVE_CACHE_TTL: Duration = Duration::from_secs(300);
 
 pub async fn run_proxy(config: AppConfig, bundle: CertificateBundle) -> Result<()> {
     let doh_client = Client::builder()
@@ -97,6 +111,7 @@ pub async fn run_proxy(config: AppConfig, bundle: CertificateBundle) -> Result<(
         config,
         doh_client,
         resolve_cache: RwLock::new(HashMap::new()),
+        doh_cache: RwLock::new(HashMap::new()),
     });
     let http_state = state.clone();
     let https_state = state.clone();
@@ -536,7 +551,7 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
                 .collect::<Vec<_>>(),
             ech_config: None,
         };
-        write_cached_upstream(state, cache_key, upstream.clone()).await;
+        write_cached_upstream(state, cache_key, upstream.clone(), FALLBACK_RESOLVE_CACHE_TTL).await;
         return Ok(upstream);
     }
 
@@ -548,7 +563,7 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
         })
         .unwrap_or(host);
 
-    let binding = resolve_https_binding(state, binding_host).await?;
+    let (binding, binding_ttl) = resolve_https_binding(state, binding_host).await?;
     let target_host = binding
         .target_name
         .clone()
@@ -564,9 +579,9 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
         if let Some(public_name) = public_name.as_deref() {
             return doh_lookup_ip_addrs(state, public_name).await;
         }
-        Ok(Vec::new())
+        Ok((Vec::new(), None))
     };
-    let (mut ips, extra_ips) =
+    let ((mut ips, addr_ttl), (extra_ips, extra_ttl)) =
         tokio::try_join!(doh_lookup_ip_addrs(state, &target_host), public_lookup)?;
     ips.extend(extra_ips);
 
@@ -602,23 +617,28 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
         .map(|ip| SocketAddr::new(ip, port))
         .collect::<Vec<_>>();
     let upstream = ResolvedUpstream { addrs, ech_config };
-    write_cached_upstream(state, cache_key, upstream.clone()).await;
+    let resolve_ttl = min_duration_options(binding_ttl, min_duration_options(addr_ttl, extra_ttl))
+        .unwrap_or(FALLBACK_RESOLVE_CACHE_TTL);
+    write_cached_upstream(state, cache_key, upstream.clone(), resolve_ttl).await;
     Ok(upstream)
 }
 
-async fn resolve_https_binding(state: &AppState, host: &str) -> Result<HttpsServiceBinding> {
-    let mut bindings = doh_lookup_https_bindings(state, host).await?;
+async fn resolve_https_binding(
+    state: &AppState,
+    host: &str,
+) -> Result<(HttpsServiceBinding, Option<Duration>)> {
+    let (mut bindings, ttl) = doh_lookup_https_bindings(state, host).await?;
     bindings.sort_by_key(|binding| binding.priority);
-    Ok(bindings.into_iter().next().unwrap_or_default())
+    Ok((bindings.into_iter().next().unwrap_or_default(), ttl))
 }
 
-async fn doh_lookup_ip_addrs(state: &AppState, host: &str) -> Result<Vec<IpAddr>> {
+async fn doh_lookup_ip_addrs(state: &AppState, host: &str) -> Result<(Vec<IpAddr>, Option<Duration>)> {
     let mut addrs = Vec::new();
 
     let (ipv6_answers, ipv4_answers) =
         tokio::try_join!(doh_query(state, host, "AAAA"), doh_query(state, host, "A"))?;
 
-    for answer in ipv6_answers {
+    for answer in &ipv6_answers {
         if answer.record_type == 28
             && let Ok(ip) = answer.data.parse::<std::net::Ipv6Addr>()
         {
@@ -626,7 +646,7 @@ async fn doh_lookup_ip_addrs(state: &AppState, host: &str) -> Result<Vec<IpAddr>
         }
     }
 
-    for answer in ipv4_answers {
+    for answer in &ipv4_answers {
         if answer.record_type == 1
             && let Ok(ip) = answer.data.parse::<std::net::Ipv4Addr>()
         {
@@ -634,16 +654,22 @@ async fn doh_lookup_ip_addrs(state: &AppState, host: &str) -> Result<Vec<IpAddr>
         }
     }
 
-    Ok(addrs)
+    let ttl = min_duration_options(
+        min_ttl_duration(&ipv6_answers),
+        min_ttl_duration(&ipv4_answers),
+    );
+
+    Ok((addrs, ttl))
 }
 
 async fn doh_lookup_https_bindings(
     state: &AppState,
     host: &str,
-) -> Result<Vec<HttpsServiceBinding>> {
+) -> Result<(Vec<HttpsServiceBinding>, Option<Duration>)> {
     let mut bindings = Vec::new();
 
-    for answer in doh_query(state, host, "HTTPS").await? {
+    let answers = doh_query(state, host, "HTTPS").await?;
+    for answer in answers.iter() {
         if answer.record_type != 65 {
             continue;
         }
@@ -654,14 +680,25 @@ async fn doh_lookup_https_bindings(
         }
     }
 
-    Ok(bindings)
+    Ok((bindings, min_ttl_duration(&answers)))
 }
 
 async fn doh_query(state: &AppState, host: &str, record_type: &str) -> Result<Vec<DohAnswer>> {
+    let cache_key = DohCacheKey {
+        host: host.to_ascii_lowercase(),
+        record_type: record_type.to_string(),
+    };
+    if let Some(cached) = read_cached_doh_answers(state, &cache_key).await {
+        return Ok(cached);
+    }
+
     let mut last_error = None;
     for endpoint in &state.config.doh_endpoints {
         match doh_query_once(&state.doh_client, endpoint, host, record_type).await {
-            Ok(answers) => return Ok(answers),
+            Ok(answers) => {
+                write_cached_doh_answers(state, cache_key.clone(), answers.clone()).await;
+                return Ok(answers);
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -680,14 +717,52 @@ async fn read_cached_upstream(state: &AppState, key: &ResolveCacheKey) -> Option
     })
 }
 
-async fn write_cached_upstream(state: &AppState, key: ResolveCacheKey, upstream: ResolvedUpstream) {
+async fn write_cached_upstream(
+    state: &AppState,
+    key: ResolveCacheKey,
+    upstream: ResolvedUpstream,
+    ttl: Duration,
+) {
+    if ttl.is_zero() {
+        return;
+    }
     let mut cache = state.resolve_cache.write().await;
     cache.retain(|_, entry| Instant::now() < entry.expires_at);
     cache.insert(
         key,
         CachedResolvedUpstream {
             upstream,
-            expires_at: Instant::now() + RESOLVE_CACHE_TTL,
+            expires_at: Instant::now() + ttl,
+        },
+    );
+}
+
+async fn read_cached_doh_answers(state: &AppState, key: &DohCacheKey) -> Option<Vec<DohAnswer>> {
+    let cache = state.doh_cache.read().await;
+    cache.get(key).and_then(|entry| {
+        if Instant::now() < entry.expires_at {
+            Some(entry.answers.clone())
+        } else {
+            None
+        }
+    })
+}
+
+async fn write_cached_doh_answers(state: &AppState, key: DohCacheKey, answers: Vec<DohAnswer>) {
+    let Some(ttl) = min_ttl_duration(&answers) else {
+        return;
+    };
+    if ttl.is_zero() {
+        return;
+    }
+
+    let mut cache = state.doh_cache.write().await;
+    cache.retain(|_, entry| Instant::now() < entry.expires_at);
+    cache.insert(
+        key,
+        CachedDohAnswers {
+            answers,
+            expires_at: Instant::now() + ttl,
         },
     );
 }
@@ -723,6 +798,23 @@ async fn doh_query_once(
     }
 
     Ok(payload.answers.unwrap_or_default())
+}
+
+fn min_ttl_duration(answers: &[DohAnswer]) -> Option<Duration> {
+    answers
+        .iter()
+        .filter_map(|answer| answer.ttl)
+        .min()
+        .map(|ttl| Duration::from_secs(ttl as u64))
+}
+
+fn min_duration_options(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
 }
 
 enum DnsHostOverride {
