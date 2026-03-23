@@ -43,6 +43,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Use crates.io in CI
+        shell: bash
         run: |
           mkdir -p .cargo
           cat > .cargo/config.toml <<'EOF'
