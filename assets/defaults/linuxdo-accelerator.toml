@@ -1,5 +1,5 @@
-listen_host = "127.0.0.1"
-hosts_ip = "127.0.0.1"
+listen_host = "127.211.73.84"
+hosts_ip = "127.211.73.84"
 http_port = 80
 https_port = 443
 upstream = "https://linux.do"

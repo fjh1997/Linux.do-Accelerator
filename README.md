@@ -142,8 +142,8 @@ linuxdo-accelerator --config /path/to/linuxdo-accelerator.toml
 ## Config Example
 
 ```toml
-listen_host = "127.0.0.1"
-hosts_ip = "127.0.0.1"
+listen_host = "127.211.73.84"
+hosts_ip = "127.211.73.84"
 http_port = 80
 https_port = 443
 upstream = "https://linux.do"
@@ -159,6 +159,8 @@ server_common_name = "linux.do"
 - 接管域名列表
 - 证书 SAN 域名列表
 - 监听地址和端口
+
+默认监听地址和 hosts 回环地址使用 `127.211.73.84`，而不是 `127.0.0.1`，这样可以尽量减少与其他只占用 `127.0.0.1` 的本地代理/抓包/加速软件冲突。
 
 ## Binaries
 
