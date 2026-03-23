@@ -11,6 +11,10 @@
     <img alt="Package" src="https://img.shields.io/badge/Package-EXE%20%7C%20DEB%20%7C%20DMG%20%7C%20APK-2da44e?style=flat-square" />
     <img alt="Mode" src="https://img.shields.io/badge/Mode-CLI%20%2B%20Desktop%20%2B%20Android-6f42c1?style=flat-square" />
   </p>
+
+  <p>
+    <a href="./CHANGELOG.md">更新日志 / Changelog</a>
+  </p>
 </div>
 
 <p align="center">
