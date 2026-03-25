@@ -71,11 +71,13 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 x509-parser = "0.16"
 md5 = "0.7"
 
-[target.'cfg(any(windows, target_os = "linux", target_os = "macos"))'.dependencies]
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wgpu", "x11", "wayland"] }
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.19"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+tray-icon = "0.19"
 gtk = "0.18"
 
 [target.'cfg(windows)'.dependencies]

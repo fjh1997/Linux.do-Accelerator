@@ -1,7 +1,8 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 #[cfg(target_os = "linux")]
 use std::{fs::OpenOptions, io::Write};
 
@@ -40,8 +41,8 @@ const APP_WINDOW_TITLE: &str = "Linux.do Accelerator";
 const APP_ID: &str = "linuxdo-accelerator";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const ACTIVE_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
-const IDLE_REPAINT_INTERVAL: Duration = Duration::from_secs(2);
-const TRAY_REPAINT_INTERVAL: Duration = Duration::from_secs(5);
+const IDLE_REPAINT_INTERVAL: Duration = Duration::from_secs(5);
+const TRAY_REPAINT_INTERVAL: Duration = Duration::from_secs(15);
 
 pub fn run(config_path: PathBuf) -> Result<()> {
     let native_options = eframe::NativeOptions {
@@ -68,11 +69,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
 }
 
 fn default_renderer() -> eframe::Renderer {
-    if cfg!(target_os = "windows") {
-        eframe::Renderer::Glow
-    } else {
-        eframe::Renderer::Wgpu
-    }
+    eframe::Renderer::Glow
 }
 
 #[cfg(target_os = "linux")]
@@ -153,6 +150,8 @@ struct AcceleratorApp {
     confirm_action: Option<GuiAction>,
     optimistic_running: Option<(bool, Instant)>,
     last_refresh: Instant,
+    config_modified_at: Option<SystemTime>,
+    runtime_log_modified_at: Option<SystemTime>,
     show_about: bool,
     show_config: bool,
     logo: egui::TextureHandle,
@@ -203,9 +202,11 @@ impl AcceleratorApp {
         install_theme(&cc.egui_ctx);
 
         let config = AppConfig::load_or_create(&config_path).unwrap_or_default();
+        let config_modified_at = file_modified_at(&config_path);
         let status = service::status(Some(config_path.clone())).unwrap_or_default();
         let hosts_backup_state = load_hosts_backup_state(&config_path);
         let recent_logs = load_recent_runtime_logs(&config_path);
+        let runtime_log_modified_at = runtime_log_file_modified_at(&config_path);
         #[cfg(target_os = "windows")]
         schedule_windows_shortcut_icon_refresh(&config_path);
         let logo = cc.egui_ctx.load_texture(
@@ -238,6 +239,8 @@ impl AcceleratorApp {
             confirm_action: None,
             optimistic_running: None,
             last_refresh: Instant::now() - Duration::from_secs(2),
+            config_modified_at,
+            runtime_log_modified_at,
             show_about: false,
             show_config: false,
             logo,
@@ -267,9 +270,17 @@ impl AcceleratorApp {
             self.status = self.apply_optimistic_state(status);
         }
         self.hosts_backup_state = load_hosts_backup_state(&self.config_path);
-        self.recent_logs = load_recent_runtime_logs(&self.config_path);
-        if let Ok(config) = AppConfig::load_or_create(&self.config_path) {
-            self.config = config;
+        let current_log_modified_at = runtime_log_file_modified_at(&self.config_path);
+        if current_log_modified_at != self.runtime_log_modified_at {
+            self.recent_logs = load_recent_runtime_logs(&self.config_path);
+            self.runtime_log_modified_at = current_log_modified_at;
+        }
+        let current_config_modified_at = file_modified_at(&self.config_path);
+        if current_config_modified_at != self.config_modified_at {
+            if let Ok(config) = AppConfig::load_or_create(&self.config_path) {
+                self.config = config;
+            }
+            self.config_modified_at = current_config_modified_at;
         }
     }
 
@@ -1395,6 +1406,16 @@ fn load_recent_runtime_logs(config_path: &Path) -> Vec<String> {
         .ok()
         .and_then(|paths| read_recent_lines(&paths, 12).ok())
         .unwrap_or_default()
+}
+
+fn runtime_log_file_modified_at(config_path: &Path) -> Option<SystemTime> {
+    service::resolve_paths(Some(config_path.to_path_buf()))
+        .ok()
+        .and_then(|paths| file_modified_at(&paths.runtime_log_path))
+}
+
+fn file_modified_at(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
 }
 
 #[cfg(target_os = "linux")]
