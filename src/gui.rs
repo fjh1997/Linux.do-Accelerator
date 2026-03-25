@@ -20,6 +20,7 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use crate::branding;
 use crate::config::AppConfig;
+use crate::hosts_store::{BackupState, backup_state};
 #[cfg(target_os = "windows")]
 use crate::paths::AppPaths;
 use crate::platform::run_elevated;
@@ -30,6 +31,7 @@ use crate::platform::{
     apply_app_window_icon, close_app_window, hide_app_window, restore_app_window,
     update_windows_shortcuts_for_exe,
 };
+use crate::runtime_log::{append as append_runtime_log, read_recent_lines};
 use crate::service;
 use crate::state::ServiceState;
 
@@ -130,10 +132,13 @@ struct AcceleratorApp {
     config_path: PathBuf,
     config: AppConfig,
     status: ServiceState,
+    hosts_backup_state: BackupState,
+    recent_logs: Vec<String>,
     feedback: String,
     busy: bool,
     action_rx: Option<Receiver<Result<String, String>>>,
     pending_action: Option<GuiAction>,
+    confirm_action: Option<GuiAction>,
     optimistic_running: Option<(bool, Instant)>,
     last_refresh: Instant,
     show_about: bool,
@@ -187,6 +192,8 @@ impl AcceleratorApp {
 
         let config = AppConfig::load_or_create(&config_path).unwrap_or_default();
         let status = service::status(Some(config_path.clone())).unwrap_or_default();
+        let hosts_backup_state = load_hosts_backup_state(&config_path);
+        let recent_logs = load_recent_runtime_logs(&config_path);
         #[cfg(target_os = "windows")]
         schedule_windows_shortcut_icon_refresh(&config_path);
         let logo = cc.egui_ctx.load_texture(
@@ -210,10 +217,13 @@ impl AcceleratorApp {
             config_path,
             config,
             status,
+            hosts_backup_state,
+            recent_logs,
             feedback: String::new(),
             busy: false,
             action_rx: None,
             pending_action: None,
+            confirm_action: None,
             optimistic_running: None,
             last_refresh: Instant::now() - Duration::from_secs(2),
             show_about: false,
@@ -244,6 +254,8 @@ impl AcceleratorApp {
         if let Ok(status) = service::status(Some(self.config_path.clone())) {
             self.status = self.apply_optimistic_state(status);
         }
+        self.hosts_backup_state = load_hosts_backup_state(&self.config_path);
+        self.recent_logs = load_recent_runtime_logs(&self.config_path);
         if let Ok(config) = AppConfig::load_or_create(&self.config_path) {
             self.config = config;
         }
@@ -277,10 +289,7 @@ impl AcceleratorApp {
         }
 
         self.busy = true;
-        self.feedback = match action {
-            GuiAction::Start => "正在申请权限并启动加速...".to_string(),
-            GuiAction::Stop => "正在停止加速...".to_string(),
-        };
+        self.feedback = action.pending_message().to_string();
 
         let config_path = self.config_path.clone();
         let (tx, rx) = mpsc::channel();
@@ -315,15 +324,27 @@ impl AcceleratorApp {
                                     self.status.last_error = None;
                                     self.optimistic_running = Some((false, deadline));
                                 }
+                                Some(GuiAction::RestoreHosts) | Some(GuiAction::Cleanup) => {
+                                    self.optimistic_running = None;
+                                    self.refresh_status();
+                                }
                                 None => {}
                             }
                         }
                         Err(message) => {
                             self.optimistic_running = None;
-                            self.status.running = false;
-                            self.status.pid = None;
-                            self.status.status_text = "启动失败".to_string();
-                            self.status.last_error = Some(message.clone());
+                            match self.pending_action {
+                                Some(GuiAction::Start) => {
+                                    self.status.running = false;
+                                    self.status.pid = None;
+                                    self.status.status_text = "启动失败".to_string();
+                                    self.status.last_error = Some(message.clone());
+                                }
+                                _ => {
+                                    self.refresh_status();
+                                    self.status.last_error = Some(message.clone());
+                                }
+                            }
                             self.feedback = format!("操作失败: {message}");
                         }
                     }
@@ -361,6 +382,207 @@ impl AcceleratorApp {
             return self.feedback.clone();
         }
         self.status.status_text.clone()
+    }
+
+    fn recent_logs_or_placeholder(&self) -> Vec<String> {
+        if self.recent_logs.is_empty() {
+            vec!["暂无运行日志。执行开始、停止、恢复等操作后会在这里显示。".to_string()]
+        } else {
+            self.recent_logs.clone()
+        }
+    }
+
+    fn hosts_backup_badge(&self) -> (&'static str, egui::Color32) {
+        match self.hosts_backup_state {
+            BackupState::Ready => ("已检测到备份", egui::Color32::from_rgb(106, 220, 155)),
+            BackupState::Missing => ("未检测到备份", egui::Color32::from_rgb(250, 196, 92)),
+            BackupState::Inconsistent => ("备份状态异常", egui::Color32::from_rgb(255, 120, 100)),
+        }
+    }
+
+    fn maintenance_hint(&self) -> &'static str {
+        if self.status.running {
+            return "恢复 hosts 需要先停止加速；彻底恢复会自动停止并清理。";
+        }
+
+        match self.hosts_backup_state {
+            BackupState::Ready => "恢复 hosts 只恢复 hosts；彻底恢复还会卸载证书并清理状态。",
+            BackupState::Missing => {
+                "未发现 hosts 备份；仍可用“彻底恢复原始状态”清理程序写入的规则。"
+            }
+            BackupState::Inconsistent => {
+                "hosts 备份状态异常；建议直接用“彻底恢复原始状态”尽量回到初始状态。"
+            }
+        }
+    }
+
+    fn can_restore_hosts(&self) -> bool {
+        !self.busy && !self.status.running && self.hosts_backup_state == BackupState::Ready
+    }
+
+    fn confirm_summary(&self, action: GuiAction) -> String {
+        match action {
+            GuiAction::RestoreHosts => "会用首次接管前的备份覆盖当前 hosts 文件。".to_string(),
+            GuiAction::Cleanup => {
+                "会停止加速，并尽量把本程序对系统做的改动恢复到初始状态。".to_string()
+            }
+            GuiAction::Start | GuiAction::Stop => "确认执行该操作。".to_string(),
+        }
+    }
+
+    fn confirm_details(&self, action: GuiAction) -> Vec<String> {
+        match action {
+            GuiAction::RestoreHosts => vec![
+                "仅恢复 hosts 文件，不会卸载根证书。".to_string(),
+                "恢复前需要确保加速已经停止。".to_string(),
+                "恢复完成后，如需再次加速，可重新点击“开始加速”。".to_string(),
+            ],
+            GuiAction::Cleanup => {
+                let mut lines = vec![
+                    "会停止当前加速服务。".to_string(),
+                    "会移除回环别名并清理运行状态。".to_string(),
+                    "会卸载根证书；后续如需继续使用，需要重新安装。".to_string(),
+                ];
+                match self.hosts_backup_state {
+                    BackupState::Ready => lines.insert(
+                        1,
+                        "当前已检测到完整 hosts 备份，会优先恢复首次接管前的原始内容。"
+                            .to_string(),
+                    ),
+                    BackupState::Missing => lines.insert(
+                        1,
+                        "当前未检测到完整 hosts 备份，无法保证完整恢复原始 hosts；会退化为仅清理本程序写入的规则。"
+                            .to_string(),
+                    ),
+                    BackupState::Inconsistent => lines.insert(
+                        1,
+                        "当前 hosts 备份状态异常，无法直接做完整恢复；会退化为仅清理本程序写入的规则。"
+                            .to_string(),
+                    ),
+                }
+                lines
+            }
+            GuiAction::Start | GuiAction::Stop => Vec::new(),
+        }
+    }
+
+    fn confirm_status_note(&self, action: GuiAction) -> Option<(String, egui::Color32)> {
+        match action {
+            GuiAction::Cleanup => {
+                let (label, color) = self.hosts_backup_badge();
+                Some((format!("当前检测结果：{label}"), color))
+            }
+            GuiAction::RestoreHosts => Some((
+                if self.status.running {
+                    "当前状态：加速中，需先停止后再恢复 hosts。".to_string()
+                } else {
+                    "当前状态：已停止，可直接恢复 hosts。".to_string()
+                },
+                if self.status.running {
+                    egui::Color32::from_rgb(250, 196, 92)
+                } else {
+                    egui::Color32::from_rgb(106, 220, 155)
+                },
+            )),
+            GuiAction::Start | GuiAction::Stop => None,
+        }
+    }
+
+    fn show_confirm_action_dialog(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.confirm_action else {
+            return;
+        };
+
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new(action.confirm_title())
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_width(500.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_width(500.0);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(self.confirm_summary(action))
+                                .font(FontId::proportional(13.0))
+                                .strong(),
+                        );
+
+                        if let Some((note, color)) = self.confirm_status_note(action) {
+                            ui.add_space(2.0);
+                            egui::Frame::new()
+                                .fill(color.linear_multiply(0.12))
+                                .stroke(egui::Stroke::new(1.0, color.linear_multiply(0.72)))
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(note)
+                                            .font(FontId::proportional(11.2))
+                                            .strong()
+                                            .color(color),
+                                    );
+                                });
+                        }
+
+                        ui.add_space(2.0);
+                        for line in self.confirm_details(action) {
+                            ui.label(
+                                RichText::new(format!("• {line}"))
+                                    .font(FontId::proportional(11.5))
+                                    .color(egui::Color32::from_rgb(213, 218, 222)),
+                            );
+                        }
+
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("这些操作会再次申请管理员权限。")
+                                .font(FontId::proportional(10.8))
+                                .color(egui::Color32::from_rgb(165, 174, 182)),
+                        );
+                    });
+
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("取消").clicked() {
+                        cancelled = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            !self.busy,
+                            egui::Button::new(
+                                RichText::new(action.confirm_button())
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(24, 24, 22)),
+                            )
+                            .fill(egui::Color32::from_rgb(243, 180, 66))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(216, 158, 58),
+                            ))
+                            .min_size(egui::vec2(168.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        confirmed = true;
+                    }
+                });
+            });
+
+        if confirmed {
+            self.confirm_action = None;
+            self.trigger_action(action);
+        } else if cancelled || !open {
+            self.confirm_action = None;
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -508,12 +730,15 @@ impl eframe::App for AcceleratorApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-            let bg = egui::Color32::from_rgb(15, 18, 22);
-            egui::Frame::new()
-                .fill(bg)
-                .inner_margin(egui::Margin::same(12))
-                .corner_radius(egui::CornerRadius::same(18))
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    let bg = egui::Color32::from_rgb(15, 18, 22);
+                    egui::Frame::new()
+                        .fill(bg)
+                        .inner_margin(egui::Margin::same(12))
+                        .corner_radius(egui::CornerRadius::same(18))
+                        .show(ui, |ui| {
                     let (headline, accent) = self.headline_status();
                     ui.horizontal(|ui| {
                         ui.add(egui::Image::new((self.logo.id(), egui::vec2(38.0, 38.0))));
@@ -585,14 +810,28 @@ impl eframe::App for AcceleratorApp {
                                 } else {
                                     "开始加速"
                                 };
+                                let (primary_fill, primary_text) = if self.status.running {
+                                    (
+                                        egui::Color32::from_rgb(176, 73, 62),
+                                        egui::Color32::from_rgb(250, 246, 244),
+                                    )
+                                } else {
+                                    (
+                                        egui::Color32::from_rgb(243, 180, 66),
+                                        egui::Color32::from_rgb(24, 24, 22),
+                                    )
+                                };
                                 if ui
                                     .add_enabled(
                                         !self.busy,
                                         egui::Button::new(
                                             RichText::new(primary_label)
                                                 .font(FontId::proportional(13.0))
-                                                .strong(),
+                                                .strong()
+                                                .color(primary_text),
                                         )
+                                        .fill(primary_fill)
+                                        .stroke(egui::Stroke::new(1.0, primary_fill.linear_multiply(0.85)))
                                         .min_size(egui::vec2(ui.available_width(), 40.0)),
                                     )
                                     .clicked()
@@ -609,7 +848,10 @@ impl eframe::App for AcceleratorApp {
                                     if ui
                                         .add_enabled(
                                             !self.busy,
-                                            egui::Button::new("最小化")
+                                            egui::Button::new(
+                                                RichText::new("最小化")
+                                                    .color(egui::Color32::from_rgb(236, 239, 241)),
+                                            )
                                                 .min_size(egui::vec2(78.0, 28.0)),
                                         )
                                         .clicked()
@@ -618,7 +860,10 @@ impl eframe::App for AcceleratorApp {
                                     }
                                     if ui
                                         .add(
-                                            egui::Button::new("设置")
+                                            egui::Button::new(
+                                                RichText::new("设置")
+                                                    .color(egui::Color32::from_rgb(236, 239, 241)),
+                                            )
                                                 .min_size(egui::vec2(64.0, 28.0)),
                                         )
                                         .clicked()
@@ -627,7 +872,10 @@ impl eframe::App for AcceleratorApp {
                                     }
                                     if ui
                                         .add(
-                                            egui::Button::new("关于")
+                                            egui::Button::new(
+                                                RichText::new("关于")
+                                                    .color(egui::Color32::from_rgb(236, 239, 241)),
+                                            )
                                                 .min_size(egui::vec2(56.0, 28.0)),
                                         )
                                         .clicked()
@@ -635,6 +883,91 @@ impl eframe::App for AcceleratorApp {
                                         self.show_about = true;
                                     }
                                 });
+                            });
+
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(34, 27, 21))
+                            .stroke(egui::Stroke::new(
+                                1.0,
+                                egui::Color32::from_rgb(81, 58, 45),
+                            ))
+                            .inner_margin(egui::Margin::same(12))
+                            .corner_radius(egui::CornerRadius::same(14))
+                            .show(&mut columns[0], |ui| {
+                                let (backup_label, backup_color) = self.hosts_backup_badge();
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new("恢复与清理")
+                                            .font(FontId::proportional(11.5))
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(255, 193, 122)),
+                                    );
+                                    egui::Frame::new()
+                                        .fill(backup_color.linear_multiply(0.14))
+                                        .stroke(egui::Stroke::new(
+                                            1.0,
+                                            backup_color.linear_multiply(0.7),
+                                        ))
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .corner_radius(egui::CornerRadius::same(255))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(backup_label)
+                                                    .font(FontId::proportional(10.5))
+                                                    .strong()
+                                                    .color(backup_color),
+                                            );
+                                        });
+                                });
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new(self.maintenance_hint())
+                                        .font(FontId::proportional(11.2))
+                                        .color(egui::Color32::from_rgb(225, 227, 230)),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new("这些操作会再次弹出管理员确认。")
+                                        .font(FontId::proportional(10.6))
+                                        .color(egui::Color32::from_rgb(176, 184, 191)),
+                                );
+                                ui.add_space(8.0);
+                                if ui
+                                    .add_enabled(
+                                        self.can_restore_hosts(),
+                                        egui::Button::new(
+                                            RichText::new("恢复 hosts")
+                                                .color(egui::Color32::from_rgb(245, 249, 247)),
+                                        )
+                                            .fill(egui::Color32::from_rgb(45, 99, 84))
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                egui::Color32::from_rgb(66, 132, 114),
+                                            ))
+                                            .min_size(egui::vec2(ui.available_width(), 34.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.confirm_action = Some(GuiAction::RestoreHosts);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !self.busy,
+                                        egui::Button::new(
+                                            RichText::new("彻底恢复原始状态")
+                                                .color(egui::Color32::from_rgb(252, 246, 245)),
+                                        )
+                                            .fill(egui::Color32::from_rgb(132, 62, 56))
+                                            .stroke(egui::Stroke::new(
+                                                1.0,
+                                                egui::Color32::from_rgb(171, 84, 76),
+                                            ))
+                                            .min_size(egui::vec2(ui.available_width(), 34.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.confirm_action = Some(GuiAction::Cleanup);
+                                }
                             });
 
                         egui::Frame::new()
@@ -647,28 +980,56 @@ impl eframe::App for AcceleratorApp {
                             .corner_radius(egui::CornerRadius::same(12))
                             .show(&mut columns[0], |ui| {
                                 ui.label(
-                                    RichText::new("错误详情")
+                                    RichText::new("状态与日志")
                                         .font(FontId::proportional(11.0))
                                         .strong()
                                         .color(egui::Color32::from_rgb(154, 167, 177)),
                                 );
                                 ui.add_space(4.0);
-                                let details = self.status.last_error.as_deref().unwrap_or(
-                                    "当前没有错误。启动失败时会直接显示真实原因。",
+                                ui.label(
+                                    RichText::new(format!("当前状态：{}", self.status.status_text))
+                                        .font(FontId::proportional(11.5))
+                                        .color(egui::Color32::from_rgb(225, 230, 234)),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    RichText::new("最近错误")
+                                        .font(FontId::proportional(10.5))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(165, 174, 182)),
+                                );
+                                let details = self
+                                    .status
+                                    .last_error
+                                    .as_deref()
+                                    .unwrap_or("当前没有错误。运行异常时会直接显示真实原因。");
+                                ui.label(
+                                    RichText::new(details)
+                                        .font(FontId::proportional(11.2))
+                                        .color(if self.status.last_error.is_some() {
+                                            egui::Color32::from_rgb(255, 124, 102)
+                                        } else {
+                                            egui::Color32::from_rgb(198, 205, 211)
+                                        }),
+                                );
+                                ui.add_space(8.0);
+                                ui.label(
+                                    RichText::new("最近操作日志")
+                                        .font(FontId::proportional(10.5))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(165, 174, 182)),
                                 );
                                 egui::ScrollArea::vertical()
-                                    .max_height(128.0)
+                                    .max_height(132.0)
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(details)
-                                                .font(FontId::proportional(11.5))
-                                                .color(if self.status.last_error.is_some() {
-                                                    egui::Color32::from_rgb(255, 124, 102)
-                                                } else {
-                                                    egui::Color32::from_rgb(198, 205, 211)
-                                                }),
-                                        );
+                                        for line in self.recent_logs_or_placeholder() {
+                                            ui.label(
+                                                RichText::new(line)
+                                                    .font(FontId::monospace(10.2))
+                                                    .color(egui::Color32::from_rgb(198, 205, 211)),
+                                            );
+                                        }
                                     });
                             });
 
@@ -758,7 +1119,10 @@ impl eframe::App for AcceleratorApp {
                             });
                     });
                 });
+            });
         });
+
+        self.show_confirm_action_dialog(ctx);
 
         if self.show_config {
             egui::Window::new("设置")
@@ -814,6 +1178,62 @@ impl eframe::App for AcceleratorApp {
 enum GuiAction {
     Start,
     Stop,
+    RestoreHosts,
+    Cleanup,
+}
+
+impl GuiAction {
+    fn pending_message(self) -> &'static str {
+        match self {
+            Self::Start => "正在申请权限并启动加速...",
+            Self::Stop => "正在停止加速...",
+            Self::RestoreHosts => "正在恢复 hosts 备份...",
+            Self::Cleanup => "正在恢复原始状态...",
+        }
+    }
+
+    fn subcommand(self) -> &'static str {
+        match self {
+            Self::Start => "helper-start",
+            Self::Stop => "helper-stop",
+            Self::RestoreHosts => "restore-hosts",
+            Self::Cleanup => "cleanup",
+        }
+    }
+
+    fn confirm_title(self) -> &'static str {
+        match self {
+            Self::RestoreHosts => "确认恢复 hosts",
+            Self::Cleanup => "确认彻底恢复原始状态",
+            Self::Start | Self::Stop => "确认操作",
+        }
+    }
+
+    fn confirm_button(self) -> &'static str {
+        match self {
+            Self::RestoreHosts => "确认恢复 hosts",
+            Self::Cleanup => "确认恢复原始状态",
+            Self::Start | Self::Stop => "确认",
+        }
+    }
+
+    fn fallback_success_message(self) -> &'static str {
+        match self {
+            Self::Start => "加速已启动，可以直接最小化窗口",
+            Self::Stop => "加速已停止",
+            Self::RestoreHosts => "hosts 已恢复为备份",
+            Self::Cleanup => "已恢复原始状态",
+        }
+    }
+
+    fn error_context(self) -> &'static str {
+        match self {
+            Self::Start => "elevation or command execution failed",
+            Self::Stop => "failed to stop acceleration from GUI",
+            Self::RestoreHosts => "failed to restore hosts from GUI",
+            Self::Cleanup => "failed to cleanup accelerator state from GUI",
+        }
+    }
 }
 
 fn execute_action(config_path: &Path, action: GuiAction) -> Result<String> {
@@ -823,24 +1243,56 @@ fn execute_action(config_path: &Path, action: GuiAction) -> Result<String> {
             .with_context(|| "macOS certificate preparation failed")?;
     }
 
+    let before_status = service::status(Some(config_path.to_path_buf())).unwrap_or_default();
+    if let Ok(paths) = service::resolve_paths(Some(config_path.to_path_buf())) {
+        let _ = append_runtime_log(
+            &paths,
+            "INFO",
+            action.subcommand(),
+            "GUI 已发起管理员操作请求",
+        );
+    }
     let cli_binary = locate_action_binary()?;
-    let subcommand = match action {
-        GuiAction::Start => "helper-start",
-        GuiAction::Stop => "helper-stop",
-    };
     let args = vec![
         "--config".to_string(),
         config_path.to_string_lossy().into_owned(),
-        subcommand.to_string(),
+        action.subcommand().to_string(),
     ];
     if let Err(error) = run_elevated(&cli_binary, &args) {
-        if let Ok(status) = service::status(Some(config_path.to_path_buf()))
-            && let Some(last_error) = status.last_error
-        {
-            return Err(Error::msg(last_error))
-                .with_context(|| "elevation or command execution failed");
+        if let Ok(status) = service::status(Some(config_path.to_path_buf())) {
+            if let Some(last_error) = status.last_error.clone() {
+                if let Ok(paths) = service::resolve_paths(Some(config_path.to_path_buf())) {
+                    let _ = append_runtime_log(
+                        &paths,
+                        "ERROR",
+                        action.subcommand(),
+                        &format!("GUI 操作失败：{last_error}"),
+                    );
+                }
+                return Err(Error::msg(last_error)).with_context(|| action.error_context());
+            }
+            if !matches!(action, GuiAction::Start) && service_state_changed(&before_status, &status)
+            {
+                if let Ok(paths) = service::resolve_paths(Some(config_path.to_path_buf())) {
+                    let _ = append_runtime_log(
+                        &paths,
+                        "WARN",
+                        action.subcommand(),
+                        &format!("GUI 检测到状态已变化：{}", status.status_text),
+                    );
+                }
+                return Err(Error::msg(status.status_text)).with_context(|| action.error_context());
+            }
         }
-        return Err(error).with_context(|| "elevation or command execution failed");
+        if let Ok(paths) = service::resolve_paths(Some(config_path.to_path_buf())) {
+            let _ = append_runtime_log(
+                &paths,
+                "ERROR",
+                action.subcommand(),
+                &format!("GUI 提权执行失败：{error}"),
+            );
+        }
+        return Err(error).with_context(|| action.error_context());
     }
 
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -853,8 +1305,17 @@ fn execute_action(config_path: &Path, action: GuiAction) -> Result<String> {
             GuiAction::Stop if !status.running => {
                 return Ok("加速已停止".to_string());
             }
+            GuiAction::RestoreHosts | GuiAction::Cleanup => {
+                if let Some(error) = status.last_error.clone() {
+                    bail!(error);
+                }
+                if service_state_changed(&before_status, &status) {
+                    return Ok(status.status_text);
+                }
+                return Ok(action.fallback_success_message().to_string());
+            }
             _ => {
-                if let Some(error) = status.last_error {
+                if let Some(error) = status.last_error.clone() {
                     bail!(error);
                 }
                 if Instant::now() >= deadline {
@@ -867,6 +1328,27 @@ fn execute_action(config_path: &Path, action: GuiAction) -> Result<String> {
             }
         }
     }
+}
+
+fn service_state_changed(before: &ServiceState, after: &ServiceState) -> bool {
+    before.running != after.running
+        || before.pid != after.pid
+        || before.status_text != after.status_text
+        || before.last_error != after.last_error
+        || before.updated_at != after.updated_at
+}
+
+fn load_hosts_backup_state(config_path: &Path) -> BackupState {
+    service::resolve_paths(Some(config_path.to_path_buf()))
+        .map(|paths| backup_state(&paths))
+        .unwrap_or(BackupState::Missing)
+}
+
+fn load_recent_runtime_logs(config_path: &Path) -> Vec<String> {
+    service::resolve_paths(Some(config_path.to_path_buf()))
+        .ok()
+        .and_then(|paths| read_recent_lines(&paths, 12).ok())
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "linux")]
@@ -915,6 +1397,7 @@ fn locate_action_binary() -> Result<PathBuf> {
     locate_current_or_sibling_binary(action_binary_name())
 }
 
+#[cfg(target_os = "linux")]
 fn locate_gui_binary() -> Result<PathBuf> {
     locate_current_or_sibling_binary(gui_binary_name())
 }
@@ -945,6 +1428,7 @@ fn action_binary_name() -> &'static str {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn gui_binary_name() -> &'static str {
     action_binary_name()
 }
@@ -984,11 +1468,13 @@ fn install_theme(ctx: &egui::Context) {
     style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(236, 239, 241);
     style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(39, 45, 53);
     style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(39, 45, 53);
+    style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(236, 239, 241);
     style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(58, 69, 79);
     style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
     style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(243, 180, 66);
     style.visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(24, 24, 22);
     style.visuals.widgets.open.bg_fill = egui::Color32::from_rgb(44, 50, 58);
+    style.visuals.widgets.open.fg_stroke.color = egui::Color32::from_rgb(236, 239, 241);
     style.visuals.selection.bg_fill = egui::Color32::from_rgb(243, 180, 66);
     style.visuals.selection.stroke.color = egui::Color32::from_rgb(24, 24, 22);
     style.visuals.window_fill = egui::Color32::from_rgb(14, 17, 21);
