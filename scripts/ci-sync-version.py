@@ -14,24 +14,39 @@ def replace_once(path: pathlib.Path, pattern: str, replacement: str) -> None:
 
 
 def main() -> int:
+    explicit_version = (os.environ.get("RELEASE_VERSION") or "").strip()
     raw_tag = (
         os.environ.get("LINUXDO_RELEASE_TAG")
         or os.environ.get("RELEASE_TAG")
         or os.environ.get("GITHUB_REF_NAME")
         or ""
     ).strip()
-    if not raw_tag:
-        raise SystemExit("missing release tag; set RELEASE_TAG or run this workflow from a tag ref")
-    if not raw_tag.startswith("v"):
-        raise SystemExit(f"release tag must start with 'v': {raw_tag}")
+    if explicit_version:
+        package_version = explicit_version
+    else:
+        if not raw_tag:
+            raise SystemExit(
+                "missing release tag or release version; set RELEASE_TAG/RELEASE_VERSION or run this workflow from a tag ref"
+            )
+        if not raw_tag.startswith("v"):
+            raise SystemExit(f"release tag must start with 'v': {raw_tag}")
+        package_version = raw_tag[1:]
 
-    package_version = raw_tag[1:]
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?", package_version)
     if not match:
-        raise SystemExit(f"unsupported release tag format: {raw_tag}")
+        raise SystemExit(f"unsupported release version format: {package_version}")
 
     major, minor, patch = (int(part) for part in match.groups())
-    android_version_code = (major * 1_000_000) + (minor * 1_000) + patch
+    build_serial_raw = (os.environ.get("ANDROID_VERSION_SERIAL") or "").strip()
+    if build_serial_raw:
+        build_serial = int(build_serial_raw)
+        if build_serial < 0 or build_serial > 9999:
+            raise SystemExit("ANDROID_VERSION_SERIAL must be between 0 and 9999")
+        android_version_code = (
+            (major * 100_000_000) + (minor * 1_000_000) + (patch * 10_000) + build_serial
+        )
+    else:
+        android_version_code = (major * 1_000_000) + (minor * 1_000) + patch
 
     repo_root = pathlib.Path(
         os.environ.get("REPO_ROOT", pathlib.Path(__file__).resolve().parents[1])
@@ -65,7 +80,7 @@ def main() -> int:
             handle.write(f"package_version={package_version}\n")
             handle.write(f"android_version_code={android_version_code}\n")
 
-    print(f"release tag: {raw_tag}")
+    print(f"release tag: {raw_tag or '(not set)'}")
     print(f"package version: {package_version}")
     print(f"android versionCode: {android_version_code}")
     return 0

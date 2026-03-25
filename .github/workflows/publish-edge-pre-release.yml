@@ -1,0 +1,268 @@
+name: Publish Edge Pre-Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: edge-pre-release
+  cancel-in-progress: true
+
+env:
+  EDGE_TAG: edge
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: linux-x64
+            package_cmd: cargo packager -f deb
+          - os: ubuntu-24.04-arm
+            artifact_name: linux-arm64
+            package_cmd: cargo packager -f deb
+          - os: windows-latest
+            artifact_name: windows-x64
+            package_cmd: cargo packager -f nsis
+          - os: windows-11-arm
+            artifact_name: windows-arm64
+            package_cmd: cargo packager -f nsis
+          - os: macos-15
+            artifact_name: macos-arm64
+            package_cmd: cargo packager -f dmg
+          - os: macos-15-intel
+            artifact_name: macos-intel
+            package_cmd: cargo packager -f dmg
+
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.artifact_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync edge build version
+        id: sync_version
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON_BIN=python3
+          else
+            PYTHON_BIN=python
+          fi
+          base_version=$("$PYTHON_BIN" - <<'PY'
+          import pathlib
+          import re
+          content = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version = "([^"]+)"$', content)
+          if not match:
+              raise SystemExit("failed to find Cargo package version")
+          print(match.group(1))
+          PY
+          )
+          build_serial="$(( GITHUB_RUN_NUMBER % 10000 ))"
+          RELEASE_VERSION="${base_version}-edge.${GITHUB_RUN_NUMBER}" \
+          ANDROID_VERSION_SERIAL="${build_serial}" \
+          "$PYTHON_BIN" ./scripts/ci-sync-version.py
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Use crates.io in CI
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.crates-io]
+          protocol = "sparse"
+
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libayatana-appindicator3-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            libxkbcommon-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked
+
+      - name: Build binary
+        run: cargo build --release --locked --bin linuxdo-accelerator
+
+      - name: Package app
+        run: ${{ matrix.package_cmd }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linuxdo-accelerator-${{ steps.sync_version.outputs.package_version }}-${{ matrix.artifact_name }}
+          path: |
+            dist/**
+            target/release/linuxdo-accelerator*
+
+  build-android:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            rust_target: aarch64-linux-android
+            artifact_name: android-arm64-v8a
+          - abi: x86_64
+            rust_target: x86_64-linux-android
+            artifact_name: android-x86_64
+
+    runs-on: ubuntu-latest
+    name: Build ${{ matrix.artifact_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync edge build version
+        id: sync_version
+        shell: bash
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON_BIN=python3
+          else
+            PYTHON_BIN=python
+          fi
+          base_version=$("$PYTHON_BIN" - <<'PY'
+          import pathlib
+          import re
+          content = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version = "([^"]+)"$', content)
+          if not match:
+              raise SystemExit("failed to find Cargo package version")
+          print(match.group(1))
+          PY
+          )
+          build_serial="$(( GITHUB_RUN_NUMBER % 10000 ))"
+          RELEASE_VERSION="${base_version}-edge.${GITHUB_RUN_NUMBER}" \
+          ANDROID_VERSION_SERIAL="${build_serial}" \
+          "$PYTHON_BIN" ./scripts/ci-sync-version.py
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Use crates.io in CI
+        shell: bash
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.crates-io]
+          protocol = "sparse"
+
+          [net]
+          git-fetch-with-cli = true
+          EOF
+
+      - name: Install Android SDK / NDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build Android APK
+        shell: bash
+        env:
+          ANDROID_ABI: ${{ matrix.abi }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+          ANDROID_BUILD_TYPE: release
+          APK_OUTPUT_NAME: linuxdo-accelerator-${{ steps.sync_version.outputs.package_version }}-android-${{ matrix.abi }}.apk
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_SDK_ROOT}/ndk/27.2.12479018"
+          ./scripts/build-android-apk.sh
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linuxdo-accelerator-${{ steps.sync_version.outputs.package_version }}-${{ matrix.artifact_name }}
+          path: |
+            android/dist/*.apk
+
+  publish-edge-release:
+    needs:
+      - build
+      - build-android
+    runs-on: ubuntu-latest
+    name: Publish Edge Pre-Release
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linuxdo-accelerator-*
+          path: release-artifacts
+          merge-multiple: false
+
+      - name: List release files
+        run: find release-artifacts -type f | sort
+
+      - name: Replace edge tag and pre-release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${EDGE_TAG}" >/dev/null 2>&1; then
+            gh release delete "${EDGE_TAG}" -y --cleanup-tag
+          fi
+
+          git push -f origin "${GITHUB_SHA}:refs/tags/${EDGE_TAG}"
+
+          short_sha="$(git rev-parse --short "${GITHUB_SHA}")"
+          notes_file="$(mktemp)"
+          cat > "${notes_file}" <<EOF
+          Auto-updated from main.
+
+          Commit: ${short_sha}
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          mapfile -t release_files < <(find release-artifacts -type f | sort)
+          if [[ "${#release_files[@]}" -eq 0 ]]; then
+            echo "no release files found" >&2
+            exit 1
+          fi
+          gh release create "${EDGE_TAG}" \
+            --prerelease \
+            --title "Edge Pre-Release" \
+            --notes-file "${notes_file}" \
+            "${release_files[@]}"
