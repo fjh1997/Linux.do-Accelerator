@@ -50,8 +50,8 @@ pub fn run(config_path: PathBuf) -> Result<()> {
             .with_title(APP_WINDOW_TITLE)
             .with_app_id(APP_ID)
             .with_icon(branding::icon_data(256))
-            .with_inner_size([980.0, 720.0])
-            .with_min_inner_size([860.0, 640.0])
+            .with_inner_size([1120.0, 820.0])
+            .with_min_inner_size([920.0, 760.0])
             .with_max_inner_size([1440.0, 1080.0])
             .with_minimize_button(!cfg!(target_os = "linux"))
             .with_maximize_button(true)
@@ -584,16 +584,14 @@ impl AcceleratorApp {
             };
 
             if ui
-                .add_enabled(
+                .add(filled_button(
+                    primary_label,
+                    primary_fill,
+                    primary_text,
+                    primary_stroke,
+                    egui::vec2(ui.available_width(), 46.0),
                     !self.busy,
-                    filled_button(
-                        primary_label,
-                        primary_fill,
-                        primary_text,
-                        primary_stroke,
-                        egui::vec2(ui.available_width(), 44.0),
-                    ),
-                )
+                ))
                 .clicked()
             {
                 let action = if self.status.running {
@@ -607,19 +605,19 @@ impl AcceleratorApp {
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .add_enabled(!self.busy, subtle_button("最小化", egui::vec2(92.0, 32.0)))
+                    .add(subtle_button("最小化", egui::vec2(96.0, 34.0), !self.busy))
                     .clicked()
                 {
                     self.minimize_to_tray(ctx);
                 }
                 if ui
-                    .add(subtle_button("设置", egui::vec2(74.0, 32.0)))
+                    .add(subtle_button("设置", egui::vec2(78.0, 34.0), true))
                     .clicked()
                 {
                     self.show_config = true;
                 }
                 if ui
-                    .add(subtle_button("关于", egui::vec2(74.0, 32.0)))
+                    .add(subtle_button("关于", egui::vec2(78.0, 34.0), true))
                     .clicked()
                 {
                     self.show_about = true;
@@ -671,32 +669,28 @@ impl AcceleratorApp {
             ui.add_space(10.0);
 
             if ui
-                .add_enabled(
+                .add(filled_button(
+                    "恢复 hosts",
+                    egui::Color32::from_rgb(46, 102, 86),
+                    egui::Color32::from_rgb(245, 249, 247),
+                    egui::Color32::from_rgb(68, 136, 116),
+                    egui::vec2(ui.available_width(), 38.0),
                     self.can_restore_hosts(),
-                    filled_button(
-                        "恢复 hosts",
-                        egui::Color32::from_rgb(46, 102, 86),
-                        egui::Color32::from_rgb(245, 249, 247),
-                        egui::Color32::from_rgb(68, 136, 116),
-                        egui::vec2(ui.available_width(), 36.0),
-                    ),
-                )
+                ))
                 .clicked()
             {
                 self.confirm_action = Some(GuiAction::RestoreHosts);
             }
 
             if ui
-                .add_enabled(
+                .add(filled_button(
+                    "彻底恢复原始状态",
+                    egui::Color32::from_rgb(136, 63, 56),
+                    egui::Color32::from_rgb(252, 247, 245),
+                    egui::Color32::from_rgb(176, 86, 77),
+                    egui::vec2(ui.available_width(), 38.0),
                     !self.busy,
-                    filled_button(
-                        "彻底恢复原始状态",
-                        egui::Color32::from_rgb(136, 63, 56),
-                        egui::Color32::from_rgb(252, 247, 245),
-                        egui::Color32::from_rgb(176, 86, 77),
-                        egui::vec2(ui.available_width(), 36.0),
-                    ),
-                )
+                ))
                 .clicked()
             {
                 self.confirm_action = Some(GuiAction::Cleanup);
@@ -902,22 +896,20 @@ impl AcceleratorApp {
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add(subtle_button("取消", egui::vec2(88.0, 32.0)))
+                        .add(subtle_button("取消", egui::vec2(92.0, 34.0), true))
                         .clicked()
                     {
                         cancelled = true;
                     }
                     if ui
-                        .add_enabled(
+                        .add(filled_button(
+                            action.confirm_button(),
+                            egui::Color32::from_rgb(243, 180, 66),
+                            egui::Color32::from_rgb(24, 24, 22),
+                            egui::Color32::from_rgb(216, 158, 58),
+                            egui::vec2(172.0, 34.0),
                             !self.busy,
-                            filled_button(
-                                action.confirm_button(),
-                                egui::Color32::from_rgb(243, 180, 66),
-                                egui::Color32::from_rgb(24, 24, 22),
-                                egui::Color32::from_rgb(216, 158, 58),
-                                egui::vec2(168.0, 32.0),
-                            ),
-                        )
+                        ))
                         .clicked()
                     {
                         confirmed = true;
@@ -1100,7 +1092,7 @@ impl eframe::App for AcceleratorApp {
                             self.render_header(ui);
                             ui.add_space(16.0);
 
-                            if ui.available_width() >= 980.0 {
+                            if ui.available_width() >= 900.0 {
                                 ui.columns(2, |columns| {
                                     columns[0].spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
                                     self.render_action_panel(&mut columns[0], ctx);
@@ -1172,7 +1164,7 @@ impl eframe::App for AcceleratorApp {
                     });
                     ui.add_space(10.0);
                     if ui
-                        .add(subtle_button("关闭", egui::vec2(88.0, 32.0)))
+                        .add(subtle_button("关闭", egui::vec2(92.0, 34.0), true))
                         .clicked()
                     {
                         self.show_config = false;
@@ -1207,7 +1199,7 @@ impl eframe::App for AcceleratorApp {
                         );
                     });
                     if ui
-                        .add(subtle_button("关闭", egui::vec2(88.0, 32.0)))
+                        .add(subtle_button("关闭", egui::vec2(92.0, 34.0), true))
                         .clicked()
                     {
                         self.show_about = false;
@@ -1574,28 +1566,65 @@ fn filled_button(
     text: egui::Color32,
     stroke: egui::Color32,
     min_size: egui::Vec2,
+    enabled: bool,
 ) -> egui::Button<'static> {
+    let (fill, text, stroke) = if enabled {
+        (fill, text, stroke)
+    } else {
+        (
+            fill.linear_multiply(0.62),
+            text.linear_multiply(0.9),
+            stroke.linear_multiply(0.68),
+        )
+    };
     egui::Button::new(
         RichText::new(label)
-            .font(FontId::proportional(12.8))
+            .font(FontId::proportional(13.0))
             .strong()
             .color(text),
     )
     .fill(fill)
     .stroke(egui::Stroke::new(1.0, stroke))
     .min_size(min_size)
+    .sense(if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    })
 }
 
-fn subtle_button(label: &'static str, min_size: egui::Vec2) -> egui::Button<'static> {
+fn subtle_button(
+    label: &'static str,
+    min_size: egui::Vec2,
+    enabled: bool,
+) -> egui::Button<'static> {
+    let (fill, text, stroke) = if enabled {
+        (
+            egui::Color32::from_rgb(38, 46, 54),
+            egui::Color32::from_rgb(234, 238, 241),
+            egui::Color32::from_rgb(60, 72, 82),
+        )
+    } else {
+        (
+            egui::Color32::from_rgb(56, 66, 76),
+            egui::Color32::from_rgb(224, 229, 234),
+            egui::Color32::from_rgb(86, 98, 109),
+        )
+    };
     egui::Button::new(
         RichText::new(label)
-            .font(FontId::proportional(12.0))
+            .font(FontId::proportional(12.2))
             .strong()
-            .color(egui::Color32::from_rgb(234, 238, 241)),
+            .color(text),
     )
-    .fill(egui::Color32::from_rgb(38, 46, 54))
-    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 72, 82)))
+    .fill(fill)
+    .stroke(egui::Stroke::new(1.0, stroke))
     .min_size(min_size)
+    .sense(if enabled {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    })
 }
 
 fn compact_metric(ui: &mut egui::Ui, label: &str, value: &str) {
