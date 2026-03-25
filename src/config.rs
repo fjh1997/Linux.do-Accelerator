@@ -6,8 +6,6 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_APP_CONFIG: &str = include_str!("../assets/defaults/linuxdo-accelerator.toml");
-const OLD_DEFAULT_LOOPBACK: &str = "127.0.0.1";
-const NEW_DEFAULT_LOOPBACK: &str = "127.211.73.84";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -91,7 +89,6 @@ impl AppConfig {
         if let Ok(mut config) = toml::from_str::<AppConfig>(&content) {
             let defaults = default_app_config();
             let mut changed = false;
-            changed |= migrate_loopback_defaults(&mut config);
             changed |= merge_missing_values(&mut config.doh_endpoints, defaults.doh_endpoints);
             changed |= merge_missing_values(&mut config.proxy_domains, defaults.proxy_domains);
             changed |= merge_missing_values(&mut config.hosts_domains, defaults.hosts_domains);
@@ -138,7 +135,6 @@ impl AppConfig {
             ca_common_name: legacy.ca_common_name,
             server_common_name: legacy.server_common_name,
         };
-        migrate_loopback_defaults(&mut config);
         merge_missing_values(&mut config.doh_endpoints, defaults.doh_endpoints);
         merge_missing_values(&mut config.proxy_domains, defaults.proxy_domains);
         merge_missing_values(&mut config.hosts_domains, defaults.hosts_domains);
@@ -254,26 +250,50 @@ fn merge_missing_values(target: &mut Vec<String>, defaults: Vec<String>) -> bool
     changed
 }
 
-fn migrate_loopback_defaults(config: &mut AppConfig) -> bool {
-    let mut changed = false;
-
-    if config.listen_host == OLD_DEFAULT_LOOPBACK {
-        config.listen_host = NEW_DEFAULT_LOOPBACK.to_string();
-        changed = true;
-    }
-
-    if config.hosts_ip == OLD_DEFAULT_LOOPBACK {
-        config.hosts_ip = NEW_DEFAULT_LOOPBACK.to_string();
-        changed = true;
-    }
-
-    changed
-}
-
 fn normalize_toml(content: &str) -> String {
     content
         .lines()
         .map(str::trim_end)
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfig, DEFAULT_APP_CONFIG};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn load_or_create_preserves_manual_loopback_override() {
+        let root = create_test_dir("preserve-manual-loopback");
+        let config_path = root.join("linuxdo-accelerator.toml");
+        let customized = DEFAULT_APP_CONFIG.replace("127.211.73.84", "127.0.0.1");
+        std::fs::write(&config_path, customized).unwrap();
+
+        let config = AppConfig::load_or_create(&config_path).unwrap();
+
+        assert_eq!(config.listen_host, "127.0.0.1");
+        assert_eq!(config.hosts_ip, "127.0.0.1");
+
+        cleanup_test_dir(&root);
+    }
+
+    fn create_test_dir(name: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        path.push(format!("linuxdo-accelerator-config-{name}-{id}"));
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn cleanup_test_dir(path: &std::path::Path) {
+        if path.exists() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
