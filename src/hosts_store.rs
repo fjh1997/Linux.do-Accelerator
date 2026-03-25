@@ -43,7 +43,11 @@ pub(crate) enum BackupState {
     Inconsistent,
 }
 
-pub(crate) fn ensure_hosts_backup(paths: &AppPaths, source_path: &Path) -> Result<()> {
+pub(crate) fn ensure_hosts_backup(
+    paths: &AppPaths,
+    source_path: &Path,
+    backup_content: &str,
+) -> Result<()> {
     match backup_state(paths) {
         BackupState::Ready => {
             validate_hosts_backup(paths, source_path)?;
@@ -59,8 +63,6 @@ pub(crate) fn ensure_hosts_backup(paths: &AppPaths, source_path: &Path) -> Resul
         BackupState::Missing => {}
     }
 
-    let original = fs::read_to_string(source_path)
-        .with_context(|| format!("failed to read hosts file {}", source_path.display()))?;
     let attributes = snapshot_file_attributes(source_path)?;
     let meta = HostsBackupMeta {
         source_path: source_path.display().to_string(),
@@ -75,7 +77,7 @@ pub(crate) fn ensure_hosts_backup(paths: &AppPaths, source_path: &Path) -> Resul
 
     cleanup_temp_file(&backup_temp_path)?;
     cleanup_temp_file(&meta_temp_path)?;
-    write_temp_file(&backup_temp_path, &original)?;
+    write_temp_file(&backup_temp_path, backup_content)?;
     write_temp_file(
         &meta_temp_path,
         std::str::from_utf8(&serialized).context("failed to encode hosts backup metadata")?,
@@ -531,10 +533,10 @@ mod tests {
         let source_path = test_dir.join("hosts");
 
         std::fs::write(&source_path, "first").unwrap();
-        ensure_hosts_backup(&paths, &source_path).unwrap();
+        ensure_hosts_backup(&paths, &source_path, "first").unwrap();
 
         std::fs::write(&source_path, "second").unwrap();
-        ensure_hosts_backup(&paths, &source_path).unwrap();
+        ensure_hosts_backup(&paths, &source_path, "second").unwrap();
 
         assert_eq!(
             std::fs::read_to_string(&paths.hosts_backup_path).unwrap(),
@@ -571,7 +573,7 @@ mod tests {
         std::fs::create_dir_all(&paths.runtime_dir).unwrap();
         let source_path = test_dir.join("hosts");
         std::fs::write(&source_path, "original").unwrap();
-        ensure_hosts_backup(&paths, &source_path).unwrap();
+        ensure_hosts_backup(&paths, &source_path, "original").unwrap();
 
         let mut meta = load_backup_meta(&paths).unwrap();
         meta.source_path = r"C:\different\hosts".to_string();

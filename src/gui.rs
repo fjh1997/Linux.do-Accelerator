@@ -20,6 +20,7 @@ use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use crate::branding;
 use crate::config::AppConfig;
+use crate::hosts::validate_hosts_backup_file;
 use crate::hosts_store::{BackupState, backup_state};
 #[cfg(target_os = "windows")]
 use crate::paths::AppPaths;
@@ -1340,7 +1341,16 @@ fn service_state_changed(before: &ServiceState, after: &ServiceState) -> bool {
 
 fn load_hosts_backup_state(config_path: &Path) -> BackupState {
     service::resolve_paths(Some(config_path.to_path_buf()))
-        .map(|paths| backup_state(&paths))
+        .map(|paths| match backup_state(&paths) {
+            BackupState::Ready => {
+                if validate_hosts_backup_file(&paths).is_ok() {
+                    BackupState::Ready
+                } else {
+                    BackupState::Inconsistent
+                }
+            }
+            state => state,
+        })
         .unwrap_or(BackupState::Missing)
 }
 

@@ -173,9 +173,10 @@ pub fn helper_stop(config_path: Option<PathBuf>) -> Result<()> {
     let result = (|| -> Result<()> {
         let config = AppConfig::load_or_create(&paths.config_path)?;
         ensure_elevated(&config, true)?;
-        terminate_running_service(&paths)?;
-
         let mut issues = Vec::new();
+        if let Some(issue) = terminate_running_service(&paths)? {
+            issues.push(issue);
+        }
         if let Err(error) = remove_hosts(&paths) {
             issues.push(format!("failed to clean managed hosts block: {error:#}"));
         }
@@ -189,7 +190,7 @@ pub fn helper_stop(config_path: Option<PathBuf>) -> Result<()> {
         let status_message = if issues.is_empty() {
             "加速已停止".to_string()
         } else {
-            "加速服务已停止，但存在残留清理问题".to_string()
+            "已执行停止请求，但存在残留清理问题".to_string()
         };
         if let Err(error) = state::mark_stopped(&paths, &status_message) {
             issues.push(format!("failed to update service state: {error:#}"));
@@ -214,9 +215,10 @@ pub fn cleanup(config_path: Option<PathBuf>) -> Result<()> {
     let result = (|| -> Result<()> {
         let config = AppConfig::load_or_create(&paths.config_path)?;
         ensure_elevated(&config, true)?;
-        terminate_running_service(&paths)?;
-
         let mut issues = Vec::new();
+        if let Some(issue) = terminate_running_service(&paths)? {
+            issues.push(issue);
+        }
         let (hosts_message, hosts_warning) = cleanup_hosts_state(&paths);
         if let Some(warning) = hosts_warning {
             issues.push(warning);
@@ -366,14 +368,22 @@ fn ensure_service_stopped_for_hosts_change(paths: &AppPaths, command_name: &str)
     Ok(())
 }
 
-fn terminate_running_service(paths: &AppPaths) -> Result<()> {
+fn terminate_running_service(paths: &AppPaths) -> Result<Option<String>> {
     if let Some(pid) = state::read_pid(paths)? {
         if is_process_running(pid) {
-            terminate_process(pid)?;
-            wait_until_stopped(pid, Duration::from_secs(5))?;
+            if let Err(error) = terminate_process(pid) {
+                return Ok(Some(format!(
+                    "failed to terminate running service pid {pid}: {error:#}"
+                )));
+            }
+            if let Err(error) = wait_until_stopped(pid, Duration::from_secs(5)) {
+                return Ok(Some(format!(
+                    "running service pid {pid} did not stop cleanly: {error:#}"
+                )));
+            }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn cleanup_hosts_state(paths: &AppPaths) -> (String, Option<String>) {

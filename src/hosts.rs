@@ -21,9 +21,10 @@ pub fn apply_hosts(config: &AppConfig, paths: &AppPaths) -> Result<()> {
     #[cfg(not(target_os = "android"))]
     {
         let path = hosts_path();
-        ensure_hosts_backup(paths, &path)?;
         let original = fs::read_to_string(&path)
             .with_context(|| format!("failed to read hosts file {}", path.display()))?;
+        let backup_baseline = backup_baseline_content(&original);
+        ensure_hosts_backup(paths, &path, &backup_baseline)?;
         let content = render_managed_hosts(&original, config);
 
         if content == original {
@@ -68,7 +69,11 @@ pub fn backup_hosts_file(paths: &AppPaths) -> Result<()> {
 
     #[cfg(not(target_os = "android"))]
     {
-        ensure_hosts_backup(paths, &hosts_path())
+        let path = hosts_path();
+        let original = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read hosts file {}", path.display()))?;
+        let backup_baseline = backup_baseline_content(&original);
+        ensure_hosts_backup(paths, &path, &backup_baseline)
     }
 }
 
@@ -124,6 +129,11 @@ fn render_managed_hosts(original: &str, config: &AppConfig) -> String {
     content.push_str(END_MARKER);
     content.push_str(newline);
     content
+}
+
+#[cfg(not(target_os = "android"))]
+fn backup_baseline_content(original: &str) -> String {
+    strip_managed_block(original)
 }
 
 #[cfg(target_os = "android")]
@@ -235,7 +245,7 @@ fn hosts_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_managed_hosts, strip_managed_block};
+    use super::{backup_baseline_content, render_managed_hosts, strip_managed_block};
     use crate::config::AppConfig;
 
     #[test]
@@ -292,5 +302,20 @@ mod tests {
 
         let stripped = strip_managed_block(&content);
         assert_eq!(stripped, content);
+    }
+
+    #[test]
+    fn backup_baseline_strips_existing_managed_block() {
+        let content = [
+            "127.0.0.1 localhost",
+            "# >>> linuxdo-accelerator >>>",
+            "127.211.73.84 linux.do",
+            "# <<< linuxdo-accelerator <<<",
+            "1.1.1.1 example.com",
+        ]
+        .join("\n");
+
+        let backup = backup_baseline_content(&content);
+        assert_eq!(backup, "127.0.0.1 localhost\n1.1.1.1 example.com");
     }
 }
