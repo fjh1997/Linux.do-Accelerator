@@ -598,7 +598,7 @@ object DnsPacketCodec {
     }
 }
 
-private fun queryTypeName(type: Int): String = when (type) {
+internal fun queryTypeName(type: Int): String = when (type) {
     LinuxdoDnsResolver.TYPE_A -> "A"
     LinuxdoDnsResolver.TYPE_AAAA -> "AAAA"
     LinuxdoDnsResolver.TYPE_SVCB -> "SVCB"
