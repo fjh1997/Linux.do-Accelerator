@@ -9,21 +9,31 @@ const DEFAULT_APP_CONFIG: &str = include_str!("../assets/defaults/linuxdo-accele
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "default_listen_host")]
     pub listen_host: String,
+    #[serde(default = "default_hosts_ip")]
     pub hosts_ip: String,
+    #[serde(default = "default_http_port")]
     pub http_port: u16,
+    #[serde(default = "default_https_port")]
     pub https_port: u16,
+    #[serde(default = "default_upstream")]
     pub upstream: String,
     #[serde(default = "default_fake_sni")]
     pub fake_sni: Option<String>,
+    #[serde(default = "default_doh_endpoints")]
     pub doh_endpoints: Vec<String>,
     #[serde(default)]
     pub dns_hosts: BTreeMap<String, String>,
+    #[serde(default = "default_proxy_domains")]
     pub proxy_domains: Vec<String>,
     #[serde(default)]
     pub hosts_domains: Vec<String>,
+    #[serde(default = "default_certificate_domains")]
     pub certificate_domains: Vec<String>,
+    #[serde(default = "default_ca_common_name")]
     pub ca_common_name: String,
+    #[serde(default = "default_server_common_name")]
     pub server_common_name: String,
 }
 
@@ -57,6 +67,46 @@ fn default_fake_sni() -> Option<String> {
     Some("www.cloudflare.com".to_string())
 }
 
+fn default_listen_host() -> String {
+    default_app_config().listen_host
+}
+
+fn default_hosts_ip() -> String {
+    default_app_config().hosts_ip
+}
+
+fn default_http_port() -> u16 {
+    default_app_config().http_port
+}
+
+fn default_https_port() -> u16 {
+    default_app_config().https_port
+}
+
+fn default_upstream() -> String {
+    default_app_config().upstream
+}
+
+fn default_doh_endpoints() -> Vec<String> {
+    default_app_config().doh_endpoints
+}
+
+fn default_proxy_domains() -> Vec<String> {
+    default_app_config().proxy_domains
+}
+
+fn default_certificate_domains() -> Vec<String> {
+    default_app_config().certificate_domains
+}
+
+fn default_ca_common_name() -> String {
+    default_app_config().ca_common_name
+}
+
+fn default_server_common_name() -> String {
+    default_app_config().server_common_name
+}
+
 fn default_app_config() -> AppConfig {
     toml::from_str(DEFAULT_APP_CONFIG)
         .expect("assets/defaults/linuxdo-accelerator.toml must be valid TOML")
@@ -86,23 +136,7 @@ impl AppConfig {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
 
-        if let Ok(mut config) = toml::from_str::<AppConfig>(&content) {
-            let defaults = default_app_config();
-            let mut changed = false;
-            changed |= merge_missing_values(&mut config.doh_endpoints, defaults.doh_endpoints);
-            changed |= merge_missing_values(&mut config.proxy_domains, defaults.proxy_domains);
-            changed |= merge_missing_values(&mut config.hosts_domains, defaults.hosts_domains);
-            changed |= merge_missing_values(
-                &mut config.certificate_domains,
-                defaults.certificate_domains,
-            );
-
-            let serialized =
-                toml::to_string_pretty(&config).context("failed to serialize config")?;
-            if changed || normalize_toml(&content) != normalize_toml(&serialized) {
-                fs::write(path, serialized)
-                    .with_context(|| format!("failed to rewrite config {}", path.display()))?;
-            }
+        if let Ok(config) = toml::from_str::<AppConfig>(&content) {
             cleanup_legacy_network_profile(path)?;
             return Ok(config);
         }
@@ -111,7 +145,7 @@ impl AppConfig {
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         let legacy_network = load_legacy_network_profile(path)?;
         let defaults = default_app_config();
-        let mut config = AppConfig {
+        let config = AppConfig {
             listen_host: legacy.listen_host,
             hosts_ip: legacy.hosts_ip,
             http_port: legacy.http_port,
@@ -121,27 +155,23 @@ impl AppConfig {
             doh_endpoints: legacy_network
                 .as_ref()
                 .map(|value| value.doh_endpoints.clone())
-                .unwrap_or_default(),
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(default_doh_endpoints),
             dns_hosts: BTreeMap::new(),
             proxy_domains: legacy_network
                 .as_ref()
                 .map(|value| value.proxy_domains.clone())
-                .unwrap_or_default(),
-            hosts_domains: Vec::new(),
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(default_proxy_domains),
+            hosts_domains: defaults.hosts_domains,
             certificate_domains: legacy_network
                 .as_ref()
                 .map(|value| value.certificate_domains.clone())
-                .unwrap_or_default(),
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(default_certificate_domains),
             ca_common_name: legacy.ca_common_name,
             server_common_name: legacy.server_common_name,
         };
-        merge_missing_values(&mut config.doh_endpoints, defaults.doh_endpoints);
-        merge_missing_values(&mut config.proxy_domains, defaults.proxy_domains);
-        merge_missing_values(&mut config.hosts_domains, defaults.hosts_domains);
-        merge_missing_values(
-            &mut config.certificate_domains,
-            defaults.certificate_domains,
-        );
 
         let serialized =
             toml::to_string_pretty(&config).context("failed to serialize migrated config")?;
@@ -239,25 +269,6 @@ fn cleanup_legacy_network_profile(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn merge_missing_values(target: &mut Vec<String>, defaults: Vec<String>) -> bool {
-    let mut changed = false;
-    for value in defaults {
-        if !target.iter().any(|existing| existing == &value) {
-            target.push(value);
-            changed = true;
-        }
-    }
-    changed
-}
-
-fn normalize_toml(content: &str) -> String {
-    content
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{AppConfig, DEFAULT_APP_CONFIG};
@@ -276,6 +287,70 @@ mod tests {
 
         assert_eq!(config.listen_host, "127.0.0.1");
         assert_eq!(config.hosts_ip, "127.0.0.1");
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn load_or_create_does_not_restore_removed_default_entries() {
+        let root = create_test_dir("preserve-custom-lists");
+        let config_path = root.join("linuxdo-accelerator.toml");
+        let customized = r#"
+listen_host = "127.0.0.1"
+hosts_ip = "127.0.0.1"
+http_port = 8080
+https_port = 8443
+upstream = "https://linux.do"
+fake_sni = "www.cloudflare.com"
+doh_endpoints = ["https://1.1.1.1/dns-query"]
+managed_prefer_ipv6 = false
+dns_hosts = {}
+proxy_domains = ["linux.do"]
+hosts_domains = ["linux.do"]
+certificate_domains = ["linux.do"]
+ca_common_name = "Linux.do Accelerator Root CA"
+server_common_name = "linux.do"
+"#;
+        std::fs::write(&config_path, customized).unwrap();
+
+        let config = AppConfig::load_or_create(&config_path).unwrap();
+        let reloaded = std::fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(config.proxy_domains, vec!["linux.do"]);
+        assert_eq!(config.hosts_domains, vec!["linux.do"]);
+        assert_eq!(config.certificate_domains, vec!["linux.do"]);
+        assert_eq!(config.doh_endpoints, vec!["https://1.1.1.1/dns-query"]);
+        assert_eq!(reloaded, customized);
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn load_or_create_uses_defaults_for_missing_fields_without_rewriting() {
+        let root = create_test_dir("missing-fields");
+        let config_path = root.join("linuxdo-accelerator.toml");
+        let customized = r#"
+listen_host = "127.0.0.1"
+hosts_ip = "127.0.0.1"
+upstream = "https://linux.do"
+doh_endpoints = ["https://1.1.1.1/dns-query"]
+proxy_domains = ["linux.do"]
+hosts_domains = ["linux.do"]
+certificate_domains = ["linux.do"]
+ca_common_name = "Linux.do Accelerator Root CA"
+server_common_name = "linux.do"
+"#;
+        std::fs::write(&config_path, customized).unwrap();
+
+        let config = AppConfig::load_or_create(&config_path).unwrap();
+        let reloaded = std::fs::read_to_string(&config_path).unwrap();
+
+        assert_eq!(config.listen_host, "127.0.0.1");
+        assert_eq!(config.hosts_ip, "127.0.0.1");
+        assert_eq!(config.http_port, 80);
+        assert_eq!(config.https_port, 443);
+        assert_eq!(config.fake_sni, Some("www.cloudflare.com".to_string()));
+        assert_eq!(reloaded, customized);
 
         cleanup_test_dir(&root);
     }
