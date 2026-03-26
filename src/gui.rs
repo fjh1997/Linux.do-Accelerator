@@ -26,10 +26,7 @@ use crate::paths::AppPaths;
 use crate::platform::run_elevated;
 use crate::platform::spawn_detached;
 #[cfg(target_os = "windows")]
-use crate::platform::{
-    apply_app_window_icon, close_app_window, hide_app_window, restore_app_window,
-    update_windows_shortcuts_for_exe,
-};
+use crate::platform::{apply_app_window_icon, update_windows_shortcuts_for_exe};
 use crate::runtime_log::{append as append_runtime_log, read_recent_lines};
 use crate::service;
 use crate::state::ServiceState;
@@ -275,9 +272,9 @@ struct AcceleratorApp {
     show_about: bool,
     show_config: bool,
     logo: egui::TextureHandle,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     tray: Option<TrayState>,
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     tray_rx: Receiver<TrayCommand>,
     #[cfg(target_os = "linux")]
     hidden_to_tray: bool,
@@ -288,22 +285,17 @@ struct AcceleratorApp {
     #[cfg(target_os = "macos")]
     last_minimized: bool,
     #[cfg(target_os = "windows")]
-    window_handle: Option<isize>,
-    #[cfg(target_os = "windows")]
     hidden_to_tray: bool,
     #[cfg(target_os = "windows")]
     last_minimized: bool,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 struct TrayState {
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
-    tray_icon: TrayIcon,
-    #[cfg(target_os = "linux")]
     control_tx: mpsc::Sender<TrayVisibilityCommand>,
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 enum TrayCommand {
     Restore,
     Quit,
@@ -334,16 +326,12 @@ impl AcceleratorApp {
         );
         #[cfg(target_os = "linux")]
         let (tray, tray_rx) = build_tray_state(&cc.egui_ctx, None);
-        #[cfg(target_os = "macos")]
-        let (tray, tray_rx) = build_tray_state(&cc.egui_ctx, None);
         #[cfg(target_os = "windows")]
         let window_handle = capture_native_window_handle(cc);
         #[cfg(target_os = "windows")]
         if let Some(hwnd) = window_handle {
             let _ = apply_app_window_icon(hwnd);
         }
-        #[cfg(target_os = "windows")]
-        let (tray, tray_rx) = build_tray_state(&cc.egui_ctx, window_handle);
         Self {
             config_path,
             config,
@@ -361,9 +349,9 @@ impl AcceleratorApp {
             show_about: false,
             show_config: false,
             logo,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "linux")]
             tray,
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(target_os = "linux")]
             tray_rx,
             #[cfg(target_os = "linux")]
             hidden_to_tray: false,
@@ -373,8 +361,6 @@ impl AcceleratorApp {
             hidden_to_tray: false,
             #[cfg(target_os = "macos")]
             last_minimized: false,
-            #[cfg(target_os = "windows")]
-            window_handle,
             #[cfg(target_os = "windows")]
             hidden_to_tray: false,
             #[cfg(target_os = "windows")]
@@ -876,15 +862,10 @@ impl AcceleratorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(error) => {
-                if let Some(tray) = &self.tray {
-                    let _ = tray.tray_icon.set_visible(true);
-                }
-                self.hidden_to_tray = true;
-                self.last_minimized = false;
-                self.feedback = format!("托盘最小化失败，已退回隐藏窗口模式: {error}");
-                if let Some(hwnd) = self.window_handle {
-                    let _ = hide_app_window(hwnd);
-                }
+                self.hidden_to_tray = false;
+                self.last_minimized = true;
+                self.feedback = format!("托盘最小化失败，已退回系统最小化: {error}");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 ctx.request_repaint();
             }
         }
@@ -916,12 +897,9 @@ impl AcceleratorApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(error) => {
-                if let Some(tray) = &self.tray {
-                    let _ = tray.tray_icon.set_visible(true);
-                }
-                self.hidden_to_tray = true;
-                self.last_minimized = false;
-                self.feedback = format!("托盘最小化失败，已退回隐藏窗口模式: {error}");
+                self.hidden_to_tray = false;
+                self.last_minimized = true;
+                self.feedback = format!("托盘最小化失败，已退回系统最小化: {error}");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                 ctx.request_repaint();
             }
@@ -931,20 +909,6 @@ impl AcceleratorApp {
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     fn minimize_to_tray(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-    }
-
-    #[cfg(target_os = "windows")]
-    fn restore_from_tray(&mut self, ctx: &egui::Context) {
-        self.hidden_to_tray = false;
-        self.last_minimized = true;
-        if let Some(tray) = &self.tray {
-            let _ = tray.tray_icon.set_visible(false);
-        }
-        if let Some(hwnd) = self.window_handle {
-            let _ = restore_app_window(hwnd);
-            let _ = apply_app_window_icon(hwnd);
-        }
-        ctx.request_repaint();
     }
 
     #[cfg(target_os = "linux")]
@@ -959,20 +923,7 @@ impl AcceleratorApp {
         ctx.request_repaint();
     }
 
-    #[cfg(target_os = "macos")]
-    fn restore_from_tray(&mut self, ctx: &egui::Context) {
-        self.hidden_to_tray = false;
-        self.last_minimized = true;
-        if let Some(tray) = &self.tray {
-            let _ = tray.tray_icon.set_visible(false);
-        }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        ctx.request_repaint();
-    }
-
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     fn poll_tray_events(&mut self, ctx: &egui::Context) {
         while let Ok(command) = self.tray_rx.try_recv() {
             match command {
@@ -982,13 +933,7 @@ impl AcceleratorApp {
                     if let Some(tray) = &self.tray {
                         let _ = tray.control_tx.send(TrayVisibilityCommand::Quit);
                     }
-                    #[cfg(target_os = "windows")]
-                    if let Some(hwnd) = self.window_handle {
-                        let _ = close_app_window(hwnd);
-                    }
                     #[cfg(target_os = "linux")]
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    #[cfg(target_os = "macos")]
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }
@@ -1017,11 +962,12 @@ impl AcceleratorApp {
 
 impl eframe::App for AcceleratorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        #[cfg(target_os = "linux")]
         {
             self.poll_tray_events(ctx);
-            self.sync_minimize_to_tray(ctx);
         }
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        self.sync_minimize_to_tray(ctx);
 
         self.poll_action();
 
@@ -1644,81 +1590,6 @@ fn compact_row(ui: &mut egui::Ui, label: &str, value: &str) {
                 .color(egui::Color32::from_rgb(224, 227, 230)),
         );
     });
-}
-
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-fn build_tray_state(
-    ctx: &egui::Context,
-    window_handle: Option<isize>,
-) -> (Option<TrayState>, Receiver<TrayCommand>) {
-    let (tx, rx) = mpsc::channel();
-    let menu = Menu::new();
-    let show_item = MenuItem::with_id("tray-show", "打开窗口", true, None);
-    let quit_item = MenuItem::with_id("tray-quit", "退出程序", true, None);
-    let tx_tray_click = tx.clone();
-    let tx_menu = tx.clone();
-    let ctx_tray_click = ctx.clone();
-    let ctx_menu = ctx.clone();
-    TrayIconEvent::set_event_handler(Some(move |event| match event {
-        TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        }
-        | TrayIconEvent::DoubleClick {
-            button: MouseButton::Left,
-            ..
-        } => {
-            let _ = tx_tray_click.send(TrayCommand::Restore);
-            #[cfg(target_os = "windows")]
-            if let Some(hwnd) = window_handle {
-                let _ = restore_app_window(hwnd);
-                let _ = apply_app_window_icon(hwnd);
-            }
-            ctx_tray_click.request_repaint();
-        }
-        _ => {}
-    }));
-    let show_id = show_item.id().clone();
-    let quit_id = quit_item.id().clone();
-    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-        if event.id == show_id {
-            let _ = tx_menu.send(TrayCommand::Restore);
-            #[cfg(target_os = "windows")]
-            if let Some(hwnd) = window_handle {
-                let _ = restore_app_window(hwnd);
-                let _ = apply_app_window_icon(hwnd);
-            }
-            ctx_menu.request_repaint();
-        } else if event.id == quit_id {
-            let _ = tx_menu.send(TrayCommand::Quit);
-            #[cfg(target_os = "windows")]
-            if let Some(hwnd) = window_handle {
-                let _ = close_app_window(hwnd);
-            }
-            ctx_menu.request_repaint();
-        }
-    }));
-
-    let result = (|| -> Result<TrayState> {
-        menu.append_items(&[&show_item, &PredefinedMenuItem::separator(), &quit_item])?;
-
-        let tray_icon = TrayIconBuilder::new()
-            .with_id("linuxdo-accelerator-tray")
-            .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
-            .with_tooltip("Linux.do Accelerator")
-            .with_icon(tray_window_icon()?)
-            .build()
-            .context("failed to create desktop tray icon")?;
-        tray_icon
-            .set_visible(false)
-            .context("failed to hide desktop tray icon")?;
-
-        Ok(TrayState { tray_icon })
-    })();
-
-    (result.ok(), rx)
 }
 
 #[cfg(target_os = "linux")]
