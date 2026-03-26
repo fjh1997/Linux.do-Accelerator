@@ -578,7 +578,14 @@ impl AcceleratorApp {
             },
         );
 
-        if inner.response.drag_started() {
+        // Drag area covers the title bar EXCLUDING the right button area (~90px)
+        let drag_rect = egui::Rect::from_min_max(
+            inner.response.rect.left_top(),
+            egui::pos2(inner.response.rect.right() - 90.0, inner.response.rect.bottom()),
+        );
+        let drag_response =
+            ui.interact(drag_rect, ui.id().with("title_bar_drag"), egui::Sense::drag());
+        if drag_response.drag_started() {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
