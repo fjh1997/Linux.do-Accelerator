@@ -39,7 +39,7 @@ const IDLE_REPAINT_INTERVAL: Duration = Duration::from_secs(5);
 const TRAY_REPAINT_INTERVAL: Duration = Duration::from_secs(15);
 const EMBEDDED_CJK_FONT: &[u8] = include_bytes!("../assets/fonts/DroidSansFallbackFull.ttf");
 const LAUNCHER_WINDOW_SIZE: [f32; 2] = [438.0, 132.0];
-const DETAILS_WINDOW_SIZE: [f32; 2] = [920.0, 660.0];
+const DETAILS_WINDOW_SIZE: [f32; 2] = [820.0, 560.0];
 
 pub fn run(config_path: PathBuf) -> Result<()> {
     let native_options = eframe::NativeOptions {
@@ -531,12 +531,12 @@ impl AcceleratorApp {
                         RichText::new("Linux.do Accelerator")
                             .font(FontId::proportional(18.0))
                             .strong()
-                            .color(egui::Color32::from_rgb(40, 44, 52)),
+                            .color(egui::Color32::from_rgb(244, 245, 247)),
                     );
                     ui.label(
                         RichText::new(format!("v{APP_VERSION}"))
                             .font(FontId::proportional(11.0))
-                            .color(egui::Color32::from_rgb(117, 126, 136)),
+                            .color(egui::Color32::from_rgb(149, 159, 168)),
                     );
                     egui::Frame::new()
                         .fill(accent.linear_multiply(0.12))
@@ -555,7 +555,7 @@ impl AcceleratorApp {
                 ui.label(
                     RichText::new("轻量本地加速工具")
                         .font(FontId::proportional(11.5))
-                        .color(egui::Color32::from_rgb(126, 134, 144)),
+                        .color(egui::Color32::from_rgb(151, 160, 169)),
                 );
             });
         });
@@ -563,8 +563,8 @@ impl AcceleratorApp {
 
     fn render_action_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         panel_frame(
-            egui::Color32::from_rgb(246, 247, 249),
-            egui::Color32::from_rgb(206, 211, 217),
+            egui::Color32::from_rgb(24, 28, 34),
+            egui::Color32::from_rgb(55, 61, 68),
         )
         .show(ui, |ui| {
             let primary_label = if self.status.running {
@@ -574,15 +574,15 @@ impl AcceleratorApp {
             };
             let (primary_fill, primary_text, primary_stroke) = if self.status.running {
                 (
-                    egui::Color32::from_rgb(245, 246, 248),
-                    egui::Color32::from_rgb(54, 62, 72),
-                    egui::Color32::from_rgb(193, 88, 74),
+                    egui::Color32::from_rgb(59, 66, 74),
+                    egui::Color32::from_rgb(242, 244, 246),
+                    egui::Color32::from_rgb(198, 92, 74),
                 )
             } else {
                 (
-                    egui::Color32::from_rgb(244, 249, 255),
-                    egui::Color32::from_rgb(30, 77, 140),
-                    egui::Color32::from_rgb(86, 143, 220),
+                    egui::Color32::from_rgb(244, 184, 72),
+                    egui::Color32::from_rgb(28, 24, 17),
+                    egui::Color32::from_rgb(219, 162, 58),
                 )
             };
 
@@ -628,20 +628,20 @@ impl AcceleratorApp {
 
                 ui.add_space(8.0);
                 let status_color = if self.status.last_error.is_some() {
-                    egui::Color32::from_rgb(191, 73, 55)
+                    egui::Color32::from_rgb(235, 110, 90)
                 } else if self.busy {
-                    egui::Color32::from_rgb(188, 139, 44)
+                    egui::Color32::from_rgb(243, 179, 74)
                 } else if self.status.running {
-                    egui::Color32::from_rgb(39, 136, 92)
+                    egui::Color32::from_rgb(117, 201, 162)
                 } else {
-                    egui::Color32::from_rgb(72, 80, 90)
+                    egui::Color32::from_rgb(213, 218, 223)
                 };
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
                         RichText::new("状态:")
                             .font(FontId::proportional(11.5))
                             .strong()
-                            .color(egui::Color32::from_rgb(62, 69, 77)),
+                            .color(egui::Color32::from_rgb(239, 242, 245)),
                     );
                     ui.label(
                         RichText::new(self.status_message())
@@ -676,20 +676,20 @@ impl AcceleratorApp {
     fn render_page_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, title: &str) {
         ui.horizontal(|ui| {
             if ui
-                .add(subtle_button("返回", egui::vec2(76.0, 34.0), true))
+                .add(subtle_button("← 返回", egui::vec2(82.0, 30.0), true))
                 .clicked()
             {
                 self.navigate_to(ctx, UiPage::Launcher);
             }
-            ui.add_space(8.0);
+            ui.add_space(6.0);
             ui.label(
                 RichText::new(title)
-                    .font(FontId::proportional(18.0))
+                    .font(FontId::proportional(17.0))
                     .strong()
-                    .color(egui::Color32::from_rgb(38, 44, 52)),
+                    .color(egui::Color32::from_rgb(244, 245, 247)),
             );
         });
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         ui.separator();
         ui.add_space(10.0);
     }
@@ -708,10 +708,10 @@ impl AcceleratorApp {
                 let size = egui::vec2(DETAILS_WINDOW_SIZE[0], DETAILS_WINDOW_SIZE[1]);
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
-                    760.0, 560.0,
+                    720.0, 520.0,
                 )));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(egui::vec2(
-                    1440.0, 1080.0,
+                    1200.0, 900.0,
                 )));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
             }
@@ -721,28 +721,28 @@ impl AcceleratorApp {
 
     fn render_status_panel(&self, ui: &mut egui::Ui) {
         panel_frame(
-            egui::Color32::from_rgb(250, 251, 252),
-            egui::Color32::from_rgb(217, 221, 226),
+            egui::Color32::from_rgb(24, 28, 34),
+            egui::Color32::from_rgb(55, 61, 68),
         )
         .show(ui, |ui| {
             ui.label(
                 RichText::new("状态与日志")
                     .font(FontId::proportional(12.0))
                     .strong()
-                    .color(egui::Color32::from_rgb(79, 87, 96)),
+                    .color(egui::Color32::from_rgb(243, 179, 74)),
             );
             ui.add_space(4.0);
             ui.label(
                 RichText::new(format!("当前状态：{}", self.status.status_text))
                     .font(FontId::proportional(12.0))
-                    .color(egui::Color32::from_rgb(47, 54, 62)),
+                    .color(egui::Color32::from_rgb(232, 236, 239)),
             );
             ui.add_space(6.0);
             ui.label(
                 RichText::new("最近错误")
                     .font(FontId::proportional(10.8))
                     .strong()
-                    .color(egui::Color32::from_rgb(105, 113, 121)),
+                    .color(egui::Color32::from_rgb(171, 180, 187)),
             );
             let details = self
                 .status
@@ -753,9 +753,9 @@ impl AcceleratorApp {
                 RichText::new(details)
                     .font(FontId::proportional(11.4))
                     .color(if self.status.last_error.is_some() {
-                        egui::Color32::from_rgb(191, 73, 55)
+                        egui::Color32::from_rgb(235, 110, 90)
                     } else {
-                        egui::Color32::from_rgb(98, 106, 114)
+                        egui::Color32::from_rgb(202, 208, 214)
                     }),
             );
             ui.add_space(8.0);
@@ -763,7 +763,7 @@ impl AcceleratorApp {
                 RichText::new("最近操作日志")
                     .font(FontId::proportional(10.8))
                     .strong()
-                    .color(egui::Color32::from_rgb(105, 113, 121)),
+                    .color(egui::Color32::from_rgb(171, 180, 187)),
             );
             egui::ScrollArea::vertical()
                 .max_height(188.0)
@@ -773,7 +773,7 @@ impl AcceleratorApp {
                         ui.label(
                             RichText::new(line)
                                 .font(FontId::monospace(10.5))
-                                .color(egui::Color32::from_rgb(92, 101, 110)),
+                                .color(egui::Color32::from_rgb(204, 210, 216)),
                         );
                     }
                 });
@@ -782,15 +782,15 @@ impl AcceleratorApp {
 
     fn render_scope_panel(&self, ui: &mut egui::Ui) {
         panel_frame(
-            egui::Color32::from_rgb(250, 251, 252),
-            egui::Color32::from_rgb(217, 221, 226),
+            egui::Color32::from_rgb(24, 28, 34),
+            egui::Color32::from_rgb(55, 61, 68),
         )
         .show(ui, |ui| {
             ui.label(
                 RichText::new("接管范围")
                     .font(FontId::proportional(12.5))
                     .strong()
-                    .color(egui::Color32::from_rgb(79, 87, 96)),
+                    .color(egui::Color32::from_rgb(243, 179, 74)),
             );
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
@@ -819,15 +819,15 @@ impl AcceleratorApp {
 
     fn render_tips_panel(&self, ui: &mut egui::Ui) {
         panel_frame(
-            egui::Color32::from_rgb(250, 251, 252),
-            egui::Color32::from_rgb(217, 221, 226),
+            egui::Color32::from_rgb(24, 28, 34),
+            egui::Color32::from_rgb(55, 61, 68),
         )
         .show(ui, |ui| {
             ui.label(
                 RichText::new("提示")
                     .font(FontId::proportional(12.5))
                     .strong()
-                    .color(egui::Color32::from_rgb(79, 87, 96)),
+                    .color(egui::Color32::from_rgb(243, 179, 74)),
             );
             ui.add_space(4.0);
             ui.label(
@@ -835,19 +835,104 @@ impl AcceleratorApp {
                     "DoH、接管域名和证书 SAN 都放在同一个 linuxdo-accelerator.toml 里，安装后直接改这一份即可。",
                 )
                 .font(FontId::proportional(11.8))
-                .color(egui::Color32::from_rgb(77, 84, 92)),
+                .color(egui::Color32::from_rgb(214, 219, 223)),
             );
             ui.add_space(6.0);
             ui.label(
                 RichText::new("重签根证书后，浏览器最好完全退出再重新打开一次。")
                     .font(FontId::proportional(11.2))
-                    .color(egui::Color32::from_rgb(103, 111, 120)),
+                    .color(egui::Color32::from_rgb(160, 171, 179)),
             );
             ui.add_space(4.0);
             ui.label(
                 RichText::new("如果系统拒绝提权、DoH 不可用或端口监听失败，界面会直接显示真实原因。")
                     .font(FontId::proportional(11.2))
-                    .color(egui::Color32::from_rgb(103, 111, 120)),
+                    .color(egui::Color32::from_rgb(160, 171, 179)),
+            );
+        });
+    }
+
+    fn render_config_content(&self, ui: &mut egui::Ui) {
+        panel_frame(
+            egui::Color32::from_rgb(24, 28, 34),
+            egui::Color32::from_rgb(55, 61, 68),
+        )
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new("配置总览")
+                    .font(FontId::proportional(15.0))
+                    .strong()
+                    .color(egui::Color32::from_rgb(243, 179, 74)),
+            );
+            ui.label(
+                RichText::new("当前使用单配置文件，修改后重新启动加速即可生效。")
+                    .font(FontId::proportional(11.2))
+                    .color(egui::Color32::from_rgb(171, 180, 187)),
+            );
+            ui.add_space(8.0);
+            detail_value_row(ui, "主配置", &self.config_path.display().to_string());
+            detail_value_row(ui, "上游", &self.config.upstream);
+            detail_value_row(
+                ui,
+                "DoH",
+                &self
+                    .config
+                    .doh_endpoints
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "未配置".to_string()),
+            );
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                compact_metric(ui, "接管域名", &self.config.proxy_domains.len().to_string());
+                compact_metric(ui, "DoH 数量", &self.config.doh_endpoints.len().to_string());
+                compact_metric(
+                    ui,
+                    "证书 SAN",
+                    &self.config.certificate_domains.len().to_string(),
+                );
+            });
+        });
+    }
+
+    fn render_about_content(&self, ui: &mut egui::Ui) {
+        panel_frame(
+            egui::Color32::from_rgb(24, 28, 34),
+            egui::Color32::from_rgb(55, 61, 68),
+        )
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Image::new((self.logo.id(), egui::vec2(40.0, 40.0))));
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new("Linux.do Accelerator")
+                            .font(FontId::proportional(17.0))
+                            .strong()
+                            .color(egui::Color32::from_rgb(244, 245, 247)),
+                    );
+                    ui.label(
+                        RichText::new(format!("版本 v{APP_VERSION}"))
+                            .font(FontId::proportional(11.2))
+                            .color(egui::Color32::from_rgb(171, 180, 187)),
+                    );
+                });
+            });
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("原生 Rust 桌面壳 + CLI")
+                    .font(FontId::proportional(12.0))
+                    .color(egui::Color32::from_rgb(214, 219, 223)),
+            );
+            ui.add_space(6.0);
+            about_bullet(
+                ui,
+                "支持证书安装、hosts 接管、本地 80/443 监听与 DoH 接管。",
+            );
+            about_bullet(ui, "DoH 与子域支持列表统一放在 linuxdo-accelerator.toml。");
+            about_bullet(ui, "点击加速会触发管理员提权，后台启动守护进程。");
+            about_bullet(
+                ui,
+                "如果提权失败、DoH 不可用或监听失败，界面会直接显示真实错误。",
             );
         });
     }
@@ -1058,16 +1143,16 @@ impl eframe::App for AcceleratorApp {
         }
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(242, 243, 245)))
+            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(17, 20, 24)))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
 
                 match self.current_page {
                     UiPage::Launcher => {
-                        ui.add_space(6.0);
+                        ui.add_space(4.0);
                         egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(242, 243, 245))
-                            .inner_margin(egui::Margin::same(8))
+                            .fill(egui::Color32::from_rgb(17, 20, 24))
+                            .inner_margin(egui::Margin::same(6))
                             .show(ui, |ui| {
                                 self.render_action_panel(ui, ctx);
                             });
@@ -1085,43 +1170,7 @@ impl eframe::App for AcceleratorApp {
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 self.render_page_header(ui, ctx, "设置");
-                                ui.label(
-                                    RichText::new("配置总览")
-                                        .font(FontId::proportional(16.0))
-                                        .strong(),
-                                );
-                                ui.label("当前使用单配置文件，修改后重新启动加速即可生效。");
-                                ui.separator();
-                                compact_row(ui, "主配置", &self.config_path.display().to_string());
-                                compact_row(ui, "上游", &self.config.upstream);
-                                compact_row(
-                                    ui,
-                                    "DoH",
-                                    &self
-                                        .config
-                                        .doh_endpoints
-                                        .first()
-                                        .cloned()
-                                        .unwrap_or_else(|| "未配置".to_string()),
-                                );
-                                ui.add_space(6.0);
-                                ui.horizontal_wrapped(|ui| {
-                                    compact_metric(
-                                        ui,
-                                        "接管域名",
-                                        &self.config.proxy_domains.len().to_string(),
-                                    );
-                                    compact_metric(
-                                        ui,
-                                        "DoH 数量",
-                                        &self.config.doh_endpoints.len().to_string(),
-                                    );
-                                    compact_metric(
-                                        ui,
-                                        "证书 SAN",
-                                        &self.config.certificate_domains.len().to_string(),
-                                    );
-                                });
+                                self.render_config_content(ui);
                             });
                     }
                     UiPage::About => {
@@ -1129,22 +1178,7 @@ impl eframe::App for AcceleratorApp {
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 self.render_page_header(ui, ctx, "关于");
-                                ui.add(egui::Image::new((self.logo.id(), egui::vec2(40.0, 40.0))));
-                                ui.label(
-                                    RichText::new("Linux.do Accelerator")
-                                        .font(FontId::proportional(17.0))
-                                        .strong(),
-                                );
-                                ui.label(format!("版本 v{APP_VERSION}"));
-                                ui.label("原生 Rust 桌面壳 + CLI");
-                                ui.label(
-                                    "支持证书安装、hosts 接管、本地 80/443 监听和 Android VPN DNS 接管。",
-                                );
-                                ui.label("DoH 与子域支持列表统一放在 linuxdo-accelerator.toml。");
-                                ui.label("点击加速会触发管理员提权，后台启动守护进程。");
-                                ui.label(
-                                    "如果系统拒绝提权、DoH 不可用或端口监听失败，界面会直接显示真实错误。",
-                                );
+                                self.render_about_content(ui);
                             });
                     }
                 }
@@ -1474,29 +1508,29 @@ fn preferred_system_font_families() -> &'static [&'static str] {
 
 fn install_theme(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
-    style.visuals = egui::Visuals::light();
-    style.visuals.override_text_color = Some(egui::Color32::from_rgb(40, 44, 52));
-    style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(246, 247, 249);
-    style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(52, 58, 66);
-    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(248, 249, 251);
-    style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(248, 249, 251);
-    style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(52, 58, 66);
-    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(241, 244, 248);
-    style.visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(241, 244, 248);
-    style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(28, 34, 42);
-    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(236, 241, 247);
-    style.visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(236, 241, 247);
-    style.visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(28, 34, 42);
-    style.visuals.widgets.open.bg_fill = egui::Color32::from_rgb(244, 246, 248);
-    style.visuals.widgets.open.fg_stroke.color = egui::Color32::from_rgb(52, 58, 66);
-    style.visuals.selection.bg_fill = egui::Color32::from_rgb(82, 140, 219);
-    style.visuals.selection.stroke.color = egui::Color32::WHITE;
-    style.visuals.window_fill = egui::Color32::from_rgb(242, 243, 245);
-    style.visuals.panel_fill = egui::Color32::from_rgb(242, 243, 245);
-    style.visuals.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(205, 210, 216));
-    style.visuals.extreme_bg_color = egui::Color32::from_rgb(235, 238, 241);
-    style.visuals.faint_bg_color = egui::Color32::from_rgb(247, 248, 250);
-    style.visuals.window_corner_radius = egui::CornerRadius::same(10);
+    style.visuals = egui::Visuals::dark();
+    style.visuals.override_text_color = Some(egui::Color32::from_rgb(232, 236, 239));
+    style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(24, 28, 34);
+    style.visuals.widgets.noninteractive.fg_stroke.color = egui::Color32::from_rgb(232, 236, 239);
+    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(32, 37, 44);
+    style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(32, 37, 44);
+    style.visuals.widgets.inactive.fg_stroke.color = egui::Color32::from_rgb(232, 236, 239);
+    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(39, 45, 53);
+    style.visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(39, 45, 53);
+    style.visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(248, 249, 250);
+    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(244, 184, 72);
+    style.visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(244, 184, 72);
+    style.visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(28, 24, 17);
+    style.visuals.widgets.open.bg_fill = egui::Color32::from_rgb(35, 40, 47);
+    style.visuals.widgets.open.fg_stroke.color = egui::Color32::from_rgb(232, 236, 239);
+    style.visuals.selection.bg_fill = egui::Color32::from_rgb(244, 184, 72);
+    style.visuals.selection.stroke.color = egui::Color32::from_rgb(28, 24, 17);
+    style.visuals.window_fill = egui::Color32::from_rgb(17, 20, 24);
+    style.visuals.panel_fill = egui::Color32::from_rgb(17, 20, 24);
+    style.visuals.window_stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(54, 60, 67));
+    style.visuals.extreme_bg_color = egui::Color32::from_rgb(12, 16, 20);
+    style.visuals.faint_bg_color = egui::Color32::from_rgb(21, 25, 30);
+    style.visuals.window_corner_radius = egui::CornerRadius::same(12);
     style.visuals.menu_corner_radius = egui::CornerRadius::same(8);
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(8);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(8);
@@ -1595,11 +1629,8 @@ fn subtle_button(
 
 fn compact_metric(ui: &mut egui::Ui, label: &str, value: &str) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(244, 246, 248))
-        .stroke(egui::Stroke::new(
-            1.0,
-            egui::Color32::from_rgb(214, 218, 223),
-        ))
+        .fill(egui::Color32::from_rgb(19, 22, 27))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 52, 60)))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .corner_radius(egui::CornerRadius::same(8))
         .show(ui, |ui| {
@@ -1607,13 +1638,13 @@ fn compact_metric(ui: &mut egui::Ui, label: &str, value: &str) {
                 ui.label(
                     RichText::new(label)
                         .font(FontId::proportional(10.0))
-                        .color(egui::Color32::from_rgb(113, 121, 130)),
+                        .color(egui::Color32::from_rgb(160, 171, 179)),
                 );
                 ui.label(
                     RichText::new(value)
                         .font(FontId::proportional(14.0))
                         .strong()
-                        .color(egui::Color32::from_rgb(54, 62, 72)),
+                        .color(egui::Color32::from_rgb(243, 179, 74)),
                 );
             });
         });
@@ -1627,13 +1658,51 @@ fn compact_row(ui: &mut egui::Ui, label: &str, value: &str) {
                 RichText::new(label)
                     .font(FontId::proportional(10.5))
                     .strong()
-                    .color(egui::Color32::from_rgb(108, 116, 124)),
+                    .color(egui::Color32::from_rgb(185, 191, 197)),
             ),
         );
         ui.label(
             RichText::new(value)
                 .font(FontId::monospace(10.5))
-                .color(egui::Color32::from_rgb(69, 77, 86)),
+                .color(egui::Color32::from_rgb(224, 227, 230)),
+        );
+    });
+}
+
+fn detail_value_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgb(19, 22, 27))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(46, 52, 60)))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .corner_radius(egui::CornerRadius::same(8))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(label)
+                    .font(FontId::proportional(10.8))
+                    .strong()
+                    .color(egui::Color32::from_rgb(243, 179, 74)),
+            );
+            ui.add_space(3.0);
+            ui.label(
+                RichText::new(value)
+                    .font(FontId::monospace(11.0))
+                    .color(egui::Color32::from_rgb(232, 236, 239)),
+            );
+        });
+}
+
+fn about_bullet(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(
+            RichText::new("•")
+                .font(FontId::proportional(13.0))
+                .strong()
+                .color(egui::Color32::from_rgb(243, 179, 74)),
+        );
+        ui.label(
+            RichText::new(text)
+                .font(FontId::proportional(11.8))
+                .color(egui::Color32::from_rgb(214, 219, 223)),
         );
     });
 }
