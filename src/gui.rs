@@ -562,14 +562,14 @@ impl AcceleratorApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(6.0);
                     if ui
-                        .add(title_bar_button("×", egui::vec2(38.0, 28.0), true, true))
+                        .add(title_bar_button("X", egui::vec2(38.0, 28.0), true, true))
                         .clicked()
                     {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     ui.add_space(2.0);
                     if ui
-                        .add(title_bar_button("—", egui::vec2(38.0, 28.0), false, true))
+                        .add(title_bar_button("_", egui::vec2(38.0, 28.0), false, true))
                         .clicked()
                     {
                         self.minimize_to_tray(ctx);
@@ -578,7 +578,10 @@ impl AcceleratorApp {
             },
         );
 
-        if inner.response.drag_started() {
+        // Enable drag on the title bar for window movement
+        let title_bar_response =
+            ui.interact(inner.response.rect, ui.id().with("title_bar_drag"), egui::Sense::drag());
+        if title_bar_response.drag_started() {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
 
@@ -1761,7 +1764,7 @@ fn format_error_chain(error: &Error) -> String {
 }
 
 fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::empty();
+    let mut fonts = FontDefinitions::default();
     let (font_name, font_data) = load_ui_font();
     fonts.font_data.insert(font_name.clone(), font_data.into());
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
