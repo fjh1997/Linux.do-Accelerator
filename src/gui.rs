@@ -38,7 +38,7 @@ const ACTIVE_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 const IDLE_REPAINT_INTERVAL: Duration = Duration::from_secs(5);
 const TRAY_REPAINT_INTERVAL: Duration = Duration::from_secs(15);
 const EMBEDDED_CJK_FONT: &[u8] = include_bytes!("../assets/fonts/DroidSansFallbackFull.ttf");
-const LAUNCHER_WINDOW_SIZE: [f32; 2] = [720.0, 260.0];
+const LAUNCHER_WINDOW_SIZE: [f32; 2] = [720.0, 290.0];
 const DETAILS_WINDOW_SIZE: [f32; 2] = [760.0, 520.0];
 const TITLE_BAR_HEIGHT: f32 = 52.0;
 
@@ -1298,11 +1298,7 @@ impl AcceleratorApp {
             let _ = tray.tray_icon.set_visible(true);
             self.hidden_to_tray = true;
             self.last_minimized = true;
-            if let Some(hwnd) = self.window_handle {
-                let _ = crate::platform::hide_app_window(hwnd);
-            } else {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             ctx.request_repaint();
         } else {
             self.feedback = "托盘不可用，已退回系统最小化".to_string();
@@ -1389,12 +1385,8 @@ impl AcceleratorApp {
         if let Some(tray) = &self.tray {
             let _ = tray.tray_icon.set_visible(false);
         }
-        if let Some(hwnd) = self.window_handle {
-            let _ = crate::platform::restore_app_window(hwnd);
-        } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
     }
 
@@ -1768,10 +1760,10 @@ fn install_fonts(ctx: &egui::Context) {
     let (font_name, font_data) = load_ui_font();
     fonts.font_data.insert(font_name.clone(), font_data.into());
     if let Some(family) = fonts.families.get_mut(&FontFamily::Proportional) {
-        family.insert(0, font_name.clone());
+        family.push(font_name.clone());
     }
     if let Some(family) = fonts.families.get_mut(&FontFamily::Monospace) {
-        family.insert(0, font_name);
+        family.push(font_name);
     }
     ctx.set_fonts(fonts);
 }
