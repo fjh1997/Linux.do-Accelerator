@@ -46,12 +46,12 @@ pub fn run(config_path: PathBuf) -> Result<()> {
             .with_title(APP_WINDOW_TITLE)
             .with_app_id(APP_ID)
             .with_icon(branding::icon_data(256))
-            .with_inner_size([1120.0, 820.0])
-            .with_min_inner_size([920.0, 760.0])
-            .with_max_inner_size([1440.0, 1080.0])
+            .with_inner_size([470.0, 170.0])
+            .with_min_inner_size([470.0, 170.0])
+            .with_max_inner_size([470.0, 170.0])
             .with_minimize_button(!cfg!(target_os = "linux"))
-            .with_maximize_button(true)
-            .with_resizable(true),
+            .with_maximize_button(false)
+            .with_resizable(false),
         ..Default::default()
     };
 
@@ -269,6 +269,7 @@ struct AcceleratorApp {
     last_refresh: Instant,
     config_modified_at: Option<SystemTime>,
     runtime_log_modified_at: Option<SystemTime>,
+    show_details: bool,
     show_about: bool,
     show_config: bool,
     logo: egui::TextureHandle,
@@ -346,6 +347,7 @@ impl AcceleratorApp {
             last_refresh: Instant::now() - Duration::from_secs(2),
             config_modified_at,
             runtime_log_modified_at,
+            show_details: false,
             show_about: false,
             show_config: false,
             logo,
@@ -557,28 +559,14 @@ impl AcceleratorApp {
         });
     }
 
-    fn render_action_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn render_action_panel(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         panel_frame(
-            egui::Color32::from_rgb(24, 31, 38),
-            egui::Color32::from_rgb(45, 58, 69),
+            egui::Color32::from_rgb(24, 29, 35),
+            egui::Color32::from_rgb(53, 61, 69),
         )
         .show(ui, |ui| {
-            ui.label(
-                RichText::new("操作")
-                    .font(FontId::proportional(12.5))
-                    .strong()
-                    .color(egui::Color32::from_rgb(248, 194, 96)),
-            );
-            ui.add_space(2.0);
-            ui.label(
-                RichText::new(self.status_message())
-                    .font(FontId::proportional(15.0))
-                    .color(egui::Color32::from_rgb(237, 239, 241)),
-            );
-            ui.add_space(8.0);
-
             let primary_label = if self.status.running {
-                "停止加速并恢复"
+                "停止加速"
             } else {
                 "开始加速"
             };
@@ -596,47 +584,91 @@ impl AcceleratorApp {
                 )
             };
 
-            if ui
-                .add(filled_button(
-                    primary_label,
-                    primary_fill,
-                    primary_text,
-                    primary_stroke,
-                    egui::vec2(ui.available_width(), 46.0),
-                    !self.busy,
-                ))
-                .clicked()
-            {
-                let action = if self.status.running {
-                    GuiAction::Stop
-                } else {
-                    GuiAction::Start
-                };
-                self.trigger_action(action);
-            }
+            ui.vertical_centered(|ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(filled_button(
+                            primary_label,
+                            primary_fill,
+                            primary_text,
+                            primary_stroke,
+                            egui::vec2(122.0, 38.0),
+                            !self.busy,
+                        ))
+                        .clicked()
+                    {
+                        let action = if self.status.running {
+                            GuiAction::Stop
+                        } else {
+                            GuiAction::Start
+                        };
+                        self.trigger_action(action);
+                    }
+                    if ui
+                        .add(subtle_button("详情", egui::vec2(72.0, 38.0), true))
+                        .clicked()
+                    {
+                        self.show_details = true;
+                    }
+                    if ui
+                        .add(subtle_button("设置", egui::vec2(72.0, 38.0), true))
+                        .clicked()
+                    {
+                        self.show_config = true;
+                    }
+                    if ui
+                        .add(subtle_button("关于", egui::vec2(72.0, 38.0), true))
+                        .clicked()
+                    {
+                        self.show_about = true;
+                    }
+                });
 
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add(subtle_button("最小化", egui::vec2(96.0, 34.0), !self.busy))
-                    .clicked()
-                {
-                    self.minimize_to_tray(ctx);
-                }
-                if ui
-                    .add(subtle_button("设置", egui::vec2(78.0, 34.0), true))
-                    .clicked()
-                {
-                    self.show_config = true;
-                }
-                if ui
-                    .add(subtle_button("关于", egui::vec2(78.0, 34.0), true))
-                    .clicked()
-                {
-                    self.show_about = true;
-                }
+                ui.add_space(12.0);
+                let status_color = if self.status.last_error.is_some() {
+                    egui::Color32::from_rgb(255, 129, 108)
+                } else if self.busy {
+                    egui::Color32::from_rgb(248, 194, 96)
+                } else if self.status.running {
+                    egui::Color32::from_rgb(125, 209, 176)
+                } else {
+                    egui::Color32::from_rgb(214, 219, 223)
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("状态:")
+                            .font(FontId::proportional(12.2))
+                            .strong()
+                            .color(egui::Color32::from_rgb(232, 236, 239)),
+                    );
+                    ui.label(
+                        RichText::new(self.status_message())
+                            .font(FontId::proportional(12.2))
+                            .color(status_color),
+                    );
+                });
             });
         });
+    }
+
+    fn render_details_content(&self, ui: &mut egui::Ui) {
+        self.render_header(ui);
+        ui.add_space(14.0);
+        if ui.available_width() >= 900.0 {
+            ui.columns(2, |columns| {
+                columns[0].spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                self.render_status_panel(&mut columns[0]);
+
+                columns[1].spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                self.render_scope_panel(&mut columns[1]);
+                self.render_tips_panel(&mut columns[1]);
+            });
+        } else {
+            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+            self.render_status_panel(ui);
+            self.render_scope_panel(ui);
+            self.render_tips_panel(ui);
+        }
     }
 
     fn render_status_panel(&self, ui: &mut egui::Ui) {
@@ -978,40 +1010,39 @@ impl eframe::App for AcceleratorApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
+            ui.add_space(8.0);
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgb(15, 19, 24))
+                .inner_margin(egui::Margin::same(14))
+                .corner_radius(egui::CornerRadius::same(18))
                 .show(ui, |ui| {
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(15, 19, 24))
-                        .inner_margin(egui::Margin::same(18))
-                        .corner_radius(egui::CornerRadius::same(24))
-                        .show(ui, |ui| {
-                            self.render_header(ui);
-                            ui.add_space(16.0);
-
-                            if ui.available_width() >= 900.0 {
-                                ui.columns(2, |columns| {
-                                    columns[0].spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                                    self.render_action_panel(&mut columns[0], ctx);
-                                    self.render_status_panel(&mut columns[0]);
-
-                                    columns[1].spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                                    self.render_scope_panel(&mut columns[1]);
-                                    self.render_tips_panel(&mut columns[1]);
-                                });
-                            } else {
-                                ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
-                                self.render_action_panel(ui, ctx);
-                                self.render_scope_panel(ui);
-                                self.render_status_panel(ui);
-                                self.render_tips_panel(ui);
-                            }
-                        });
+                    self.render_action_panel(ui, ctx);
                 });
         });
 
         self.show_confirm_action_dialog(ctx);
+
+        if self.show_details {
+            egui::Window::new("状态详情")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(880.0)
+                .default_height(620.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            self.render_details_content(ui);
+                            ui.add_space(10.0);
+                            if ui
+                                .add(subtle_button("关闭", egui::vec2(92.0, 34.0), true))
+                                .clicked()
+                            {
+                                self.show_details = false;
+                            }
+                        });
+                });
+        }
 
         if self.show_config {
             egui::Window::new("设置")
