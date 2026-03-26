@@ -53,7 +53,7 @@ pub fn run(config_path: PathBuf) -> Result<()> {
             .with_inner_size(LAUNCHER_WINDOW_SIZE)
             .with_min_inner_size(LAUNCHER_WINDOW_SIZE)
             .with_max_inner_size(LAUNCHER_WINDOW_SIZE)
-            .with_minimize_button(!cfg!(target_os = "linux"))
+            .with_minimize_button(true)
             .with_maximize_button(false)
             .with_resizable(false),
         ..Default::default()
