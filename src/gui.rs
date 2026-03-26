@@ -188,7 +188,6 @@ enum TrayCommand {
 
 #[cfg(target_os = "linux")]
 enum TrayVisibilityCommand {
-    Show,
     Hide,
     Quit,
 }
@@ -1270,7 +1269,7 @@ fn format_error_chain(error: &Error) -> String {
 }
 
 fn install_fonts(ctx: &egui::Context) {
-    let mut fonts = FontDefinitions::default();
+    let mut fonts = FontDefinitions::empty();
     fonts.font_data.insert(
         "linuxdo_cjk".to_string(),
         egui::FontData::from_static(include_bytes!("../assets/fonts/DroidSansFallbackFull.ttf"))
@@ -1597,9 +1596,6 @@ fn build_tray_state(
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(command) = control_rx.try_recv() {
                 match command {
-                    TrayVisibilityCommand::Show => {
-                        let _ = tray_icon.set_visible(true);
-                    }
                     TrayVisibilityCommand::Hide => {
                         let _ = tray_icon.set_visible(false);
                     }
@@ -1660,4 +1656,5 @@ fn schedule_windows_shortcut_icon_refresh(config_path: &Path) {
 }
 
 #[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 fn schedule_windows_shortcut_icon_refresh(_config_path: &Path) {}

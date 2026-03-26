@@ -46,7 +46,7 @@ pub enum Command {
     TrayShell,
 }
 
-pub async fn run(cli: Cli) -> Result<()> {
+pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None | Some(Command::Gui) => {
             #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -68,10 +68,10 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("setup complete");
         }
         Some(Command::Run) => {
-            service::run_foreground(cli.config, false).await?;
+            run_async(service::run_foreground(cli.config, false))?;
         }
         Some(Command::Start) => {
-            service::run_foreground(cli.config, true).await?;
+            run_async(service::run_foreground(cli.config, true))?;
         }
         Some(Command::Stop) | Some(Command::HelperStop) => {
             service::helper_stop(cli.config)?;
@@ -115,7 +115,7 @@ pub async fn run(cli: Cli) -> Result<()> {
             println!("service started");
         }
         Some(Command::Daemon) => {
-            service::run_foreground(cli.config, false).await?;
+            run_async(service::run_foreground(cli.config, false))?;
         }
         Some(Command::TrayShell) => {
             #[cfg(target_os = "linux")]
@@ -131,4 +131,14 @@ pub async fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_async<F>(future: F) -> Result<()>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(future)
 }
