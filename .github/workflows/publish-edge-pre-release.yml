@@ -259,11 +259,14 @@ jobs:
           Commit: ${short_sha}
           Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           EOF
-          mapfile -t release_files < <(find release-artifacts -type f | sort)
+          mapfile -t release_files < <(
+            find release-artifacts -type f \( -path '*/dist/*' -o -name '*.apk' \) | sort
+          )
           if [[ "${#release_files[@]}" -eq 0 ]]; then
             echo "no release files found" >&2
             exit 1
           fi
+          printf 'release asset: %s\n' "${release_files[@]}"
           gh release create "${EDGE_TAG}" \
             --prerelease \
             --title "Edge Pre-Release" \
