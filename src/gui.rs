@@ -667,11 +667,12 @@ impl AcceleratorApp {
                 ui.set_min_size(egui::vec2(0.0, 44.0));
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new("●")
-                                .font(FontId::proportional(12.0))
-                                .color(accent),
+                        let (dot_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(12.0, 12.0),
+                            egui::Sense::hover(),
                         );
+                        ui.painter()
+                            .circle_filled(dot_rect.center(), 5.0, accent);
                         ui.label(
                             RichText::new(match headline {
                                 "已接管" => "正在加速",
@@ -2135,11 +2136,12 @@ fn detail_value_row(ui: &mut egui::Ui, label: &str, value: &str) {
 
 fn about_bullet(ui: &mut egui::Ui, text: &str) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(
-            RichText::new("•")
-                .font(FontId::proportional(14.0))
-                .strong()
-                .color(egui::Color32::from_rgb(243, 179, 74)),
+        let (dot_rect, _) =
+            ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+        ui.painter().circle_filled(
+            egui::pos2(dot_rect.center().x, dot_rect.center().y),
+            3.5,
+            egui::Color32::from_rgb(243, 179, 74),
         );
         ui.label(
             RichText::new(text)
