@@ -3,6 +3,8 @@ use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::net::Ipv4Addr;
+#[cfg(target_family = "unix")]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -232,6 +234,16 @@ pub fn terminate_process(pid: u32) -> Result<()> {
     }
 
     run_command("kill", &["-TERM", &pid.to_string()])?;
+    Ok(())
+}
+
+pub fn terminate_process_force(pid: u32) -> Result<()> {
+    if cfg!(target_os = "windows") {
+        run_command("taskkill", &["/PID", &pid.to_string(), "/T", "/F"])?;
+        return Ok(());
+    }
+
+    run_command("kill", &["-KILL", &pid.to_string()])?;
     Ok(())
 }
 
@@ -652,13 +664,13 @@ fn macos_ca_trusted(ca_cert_path: &Path) -> Result<bool> {
 }
 
 pub fn sync_user_ownership(_path: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(target_family = "unix")]
     {
         if !is_elevated() {
             return Ok(());
         }
 
-        let Some((uid, gid)) = original_user_ids() else {
+        let Some((uid, gid)) = sync_target_user_ids(_path) else {
             return Ok(());
         };
 
@@ -668,6 +680,32 @@ pub fn sync_user_ownership(_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(target_family = "unix")]
+fn sync_target_user_ids(path: &Path) -> Option<(u32, u32)> {
+    #[cfg(target_os = "linux")]
+    if let Some(ids) = original_user_ids() {
+        return Some(ids);
+    }
+
+    owner_ids_from_parent(path)
+}
+
+#[cfg(target_family = "unix")]
+fn owner_ids_from_parent(path: &Path) -> Option<(u32, u32)> {
+    let mut current = if path.is_dir() {
+        Some(path)
+    } else {
+        path.parent()
+    }?;
+
+    loop {
+        if let Ok(metadata) = fs::metadata(current) {
+            return Some((metadata.uid(), metadata.gid()));
+        }
+        current = current.parent()?;
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -787,7 +825,7 @@ fn original_user_ids() -> Option<(u32, u32)> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_family = "unix")]
 fn chown_recursive(path: &Path, uid: u32, gid: u32) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -814,7 +852,7 @@ fn chown_recursive(path: &Path, uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(target_family = "unix")]
 fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<()> {
     if !path.exists() {
         return Ok(());

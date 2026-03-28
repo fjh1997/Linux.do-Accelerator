@@ -38,7 +38,7 @@ const ACTIVE_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 const IDLE_REPAINT_INTERVAL: Duration = Duration::from_secs(5);
 const TRAY_REPAINT_INTERVAL: Duration = Duration::from_secs(15);
 const EMBEDDED_CJK_FONT: &[u8] = include_bytes!("../assets/fonts/DroidSansFallbackFull.ttf");
-const LAUNCHER_WINDOW_SIZE: [f32; 2] = [720.0, 244.0];
+const LAUNCHER_CONTENT_SIZE: [f32; 2] = [620.0, 186.0];
 const DETAILS_WINDOW_SIZE: [f32; 2] = [760.0, 520.0];
 const TITLE_BAR_HEIGHT: f32 = 52.0;
 
@@ -55,8 +55,18 @@ fn use_native_wayland_frame() -> bool {
     false
 }
 
+fn launcher_window_size() -> egui::Vec2 {
+    let base = egui::vec2(LAUNCHER_CONTENT_SIZE[0], LAUNCHER_CONTENT_SIZE[1]);
+    if use_native_wayland_frame() {
+        base
+    } else {
+        egui::vec2(base.x, base.y + TITLE_BAR_HEIGHT + 2.0)
+    }
+}
+
 pub fn run(config_path: PathBuf) -> Result<()> {
     let native_wayland_frame = use_native_wayland_frame();
+    let launcher_size = launcher_window_size();
     let native_options = eframe::NativeOptions {
         renderer: default_renderer(),
         viewport: egui::ViewportBuilder::default()
@@ -64,9 +74,9 @@ pub fn run(config_path: PathBuf) -> Result<()> {
             .with_app_id(APP_ID)
             .with_icon(branding::icon_data(256))
             .with_decorations(native_wayland_frame)
-            .with_inner_size(LAUNCHER_WINDOW_SIZE)
-            .with_min_inner_size(LAUNCHER_WINDOW_SIZE)
-            .with_max_inner_size(LAUNCHER_WINDOW_SIZE)
+            .with_inner_size(launcher_size)
+            .with_min_inner_size(launcher_size)
+            .with_max_inner_size(launcher_size)
             .with_minimize_button(true)
             .with_maximize_button(false)
             .with_resizable(false),
@@ -277,6 +287,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
 struct AcceleratorApp {
     config_path: PathBuf,
     config: AppConfig,
+    edge_node_input: String,
     status: ServiceState,
     recent_logs: Vec<String>,
     feedback: String,
@@ -285,6 +296,8 @@ struct AcceleratorApp {
     pending_action: Option<GuiAction>,
     confirm_action: Option<GuiAction>,
     optimistic_running: Option<(bool, Instant)>,
+    drag_blockers: Vec<egui::Rect>,
+    center_window_pending: bool,
     last_refresh: Instant,
     config_modified_at: Option<SystemTime>,
     runtime_log_modified_at: Option<SystemTime>,
@@ -349,6 +362,7 @@ impl AcceleratorApp {
         install_theme(&cc.egui_ctx);
 
         let config = AppConfig::load_or_create(&config_path).unwrap_or_default();
+        let edge_node_input = config.edge_node_override().unwrap_or_default().to_string();
         let config_modified_at = file_modified_at(&config_path);
         let status = service::status(Some(config_path.clone())).unwrap_or_default();
         let recent_logs = load_recent_runtime_logs(&config_path);
@@ -373,6 +387,7 @@ impl AcceleratorApp {
         Self {
             config_path,
             config,
+            edge_node_input,
             status,
             recent_logs,
             feedback: String::new(),
@@ -381,6 +396,8 @@ impl AcceleratorApp {
             pending_action: None,
             confirm_action: None,
             optimistic_running: None,
+            drag_blockers: Vec::new(),
+            center_window_pending: true,
             last_refresh: Instant::now() - Duration::from_secs(2),
             config_modified_at,
             runtime_log_modified_at,
@@ -424,6 +441,11 @@ impl AcceleratorApp {
         if current_config_modified_at != self.config_modified_at {
             if let Ok(config) = AppConfig::load_or_create(&self.config_path) {
                 self.config = config;
+                self.edge_node_input = self
+                    .config
+                    .edge_node_override()
+                    .unwrap_or_default()
+                    .to_string();
             }
             self.config_modified_at = current_config_modified_at;
         }
@@ -597,6 +619,10 @@ impl AcceleratorApp {
         }
     }
 
+    fn edge_node_label(&self) -> &str {
+        self.config.edge_node_override().unwrap_or("自动")
+    }
+
     fn save_current_config(&mut self) -> Result<()> {
         let serialized =
             toml::to_string_pretty(&self.config).context("failed to serialize config")?;
@@ -606,7 +632,49 @@ impl AcceleratorApp {
         Ok(())
     }
 
+    fn set_edge_node_override(&mut self) {
+        if self.status.running {
+            self.feedback = "请先停止加速，再修改边缘节点".to_string();
+            return;
+        }
+
+        let next_value = self.edge_node_input.trim();
+        let next_value = if next_value.is_empty() {
+            None
+        } else {
+            Some(next_value.to_string())
+        };
+
+        if self.config.edge_node_override() == next_value.as_deref() {
+            self.feedback = "边缘节点未变化".to_string();
+            return;
+        }
+
+        self.config.edge_node = next_value;
+        match self.save_current_config() {
+            Ok(()) => {
+                self.edge_node_input = self
+                    .config
+                    .edge_node_override()
+                    .unwrap_or_default()
+                    .to_string();
+                self.feedback = if self.config.edge_node_override().is_some() {
+                    format!("已设置边缘节点：{}", self.edge_node_label())
+                } else {
+                    "已恢复自动选择边缘节点".to_string()
+                };
+            }
+            Err(error) => {
+                self.feedback = format!("保存配置失败: {}", format_error_chain(&error));
+            }
+        }
+    }
+
     fn set_ip_preference(&mut self, prefer_ipv6: bool) {
+        if self.status.running {
+            self.feedback = "请先停止加速，再切换 IPv4 / IPv6 优先级".to_string();
+            return;
+        }
         if self.config.managed_prefer_ipv6 == prefer_ipv6 {
             return;
         }
@@ -625,31 +693,45 @@ impl AcceleratorApp {
         }
     }
 
-    fn render_ip_preference_toggle(&mut self, ui: &mut egui::Ui) {
+    fn render_ip_preference_toggle(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(6.0, 0.0);
-            if ui
-                .add(ip_priority_button(
-                    "IPv4",
-                    !self.config.managed_prefer_ipv6,
-                    !self.busy,
-                ))
-                .clicked()
-            {
+            let ip_toggle_enabled = !self.busy && !self.status.running;
+            let ipv4_response = ui.add(ip_priority_button(
+                "IPv4",
+                !self.config.managed_prefer_ipv6,
+                ip_toggle_enabled,
+            ));
+            self.register_drag_blocker(ipv4_response.rect);
+            if ipv4_response.clicked() {
                 self.set_ip_preference(false);
             }
 
-            if ui
-                .add(ip_priority_button(
-                    "IPv6",
-                    self.config.managed_prefer_ipv6,
-                    !self.busy,
-                ))
-                .clicked()
-            {
+            let ipv6_response = ui.add(ip_priority_button(
+                "IPv6",
+                self.config.managed_prefer_ipv6,
+                ip_toggle_enabled,
+            ));
+            self.register_drag_blocker(ipv6_response.rect);
+            if ipv6_response.clicked() {
                 self.set_ip_preference(true);
             }
+
+            ui.add_space(4.0);
+            let details_response = ui.add(launcher_secondary_button(
+                "查看详情",
+                egui::vec2(80.0, 26.0),
+                true,
+            ));
+            self.register_drag_blocker(details_response.rect);
+            if details_response.clicked() {
+                self.navigate_to(ctx, UiPage::Details);
+            }
         });
+    }
+
+    fn register_drag_blocker(&mut self, rect: egui::Rect) {
+        self.drag_blockers.push(rect);
     }
 
     fn drag_area(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, rect: egui::Rect, id: &str) {
@@ -657,8 +739,20 @@ impl AcceleratorApp {
             let _ = (ui, ctx, rect, id);
             return;
         }
-        let response = ui.interact(rect, ui.id().with(id), egui::Sense::hover());
-        let pressed_on_drag_area = response.hovered() && ctx.input(|i| i.pointer.primary_pressed());
+        let _ = (ui, id);
+        let pressed_on_drag_area = ctx.input(|i| {
+            i.pointer.primary_pressed()
+                && i.pointer
+                    .interact_pos()
+                    .map(|pos| {
+                        rect.contains(pos)
+                            && !self
+                                .drag_blockers
+                                .iter()
+                                .any(|blocked| blocked.contains(pos))
+                    })
+                    .unwrap_or(false)
+        });
         if pressed_on_drag_area {
             ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
@@ -690,17 +784,17 @@ impl AcceleratorApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(6.0);
-                    if ui
-                        .add(title_bar_button("X", egui::vec2(38.0, 28.0), true, true))
-                        .clicked()
-                    {
+                    let close_response =
+                        ui.add(title_bar_button("X", egui::vec2(38.0, 28.0), true, true));
+                    self.register_drag_blocker(close_response.rect);
+                    if close_response.clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     ui.add_space(2.0);
-                    if ui
-                        .add(title_bar_button("_", egui::vec2(38.0, 28.0), false, true))
-                        .clicked()
-                    {
+                    let minimize_response =
+                        ui.add(title_bar_button("_", egui::vec2(38.0, 28.0), false, true));
+                    self.register_drag_blocker(minimize_response.rect);
+                    if minimize_response.clicked() {
                         self.minimize_to_tray(ctx);
                     }
                 });
@@ -852,25 +946,10 @@ impl AcceleratorApp {
     }
 
     fn render_action_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let native_frame = use_native_wayland_frame();
         egui::Frame::new()
             .fill(egui::Color32::from_rgb(26, 30, 36))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 56, 64)))
-            .inner_margin(if native_frame {
-                egui::Margin {
-                    left: 10,
-                    right: 6,
-                    top: 10,
-                    bottom: 10,
-                }
-            } else {
-                egui::Margin {
-                    left: 8,
-                    right: 5,
-                    top: 8,
-                    bottom: 8,
-                }
-            })
+            .inner_margin(egui::Margin::same(8))
             .corner_radius(egui::CornerRadius::same(14))
             .show(ui, |ui| {
                 let primary_label = if self.status.running {
@@ -894,33 +973,31 @@ impl AcceleratorApp {
 
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                 ui.vertical(|ui| {
-                    let gap = 8.0;
-                    let right_width = if native_frame { 168.0 } else { 164.0 };
-                    let content_width = ui.available_width().min(620.0);
-                    let left_width = (content_width - gap - right_width).max(280.0);
-                    let stack_height = if native_frame { 118.0 } else { 108.0 };
-                    let button_height = if native_frame { 60.0 } else { 58.0 };
-                    let footer_height = if native_frame { 50.0 } else { 44.0 };
+                    let gap = 6.0;
+                    let right_width = 144.0;
+                    let left_width = ui.available_width() - gap - right_width;
+                    let stack_height = 92.0;
+                    let button_height = 48.0;
+                    let footer_height = 38.0;
 
-                    ui.horizontal_centered(|ui| {
+                    ui.horizontal(|ui| {
                         ui.allocate_ui_with_layout(
                             egui::vec2(left_width, stack_height),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                if ui
-                                    .add_sized(
-                                        [left_width, button_height],
-                                        launcher_primary_button(
-                                            primary_label,
-                                            primary_fill,
-                                            primary_text,
-                                            primary_stroke,
-                                            egui::vec2(left_width, button_height),
-                                            !self.busy,
-                                        ),
-                                    )
-                                    .clicked()
-                                {
+                                let primary_response = ui.add_sized(
+                                    [left_width, button_height],
+                                    launcher_primary_button(
+                                        primary_label,
+                                        primary_fill,
+                                        primary_text,
+                                        primary_stroke,
+                                        egui::vec2(left_width, button_height),
+                                        !self.busy,
+                                    ),
+                                );
+                                self.register_drag_blocker(primary_response.rect);
+                                if primary_response.clicked() {
                                     let action = if self.status.running {
                                         GuiAction::Stop
                                     } else {
@@ -937,7 +1014,7 @@ impl AcceleratorApp {
                         ui.add_space(gap);
                         ui.allocate_ui_with_layout(
                             egui::vec2(right_width, stack_height),
-                            egui::Layout::top_down(egui::Align::Center),
+                            egui::Layout::top_down(egui::Align::Min),
                             |ui| {
                                 self.render_launcher_status_card(ui, ctx, stack_height);
                             },
@@ -947,7 +1024,7 @@ impl AcceleratorApp {
             });
     }
 
-    fn render_details_content(&self, ui: &mut egui::Ui) {
+    fn render_details_content(&mut self, ui: &mut egui::Ui) {
         self.render_brand_banner(ui, "详情与设置", "集中查看状态、配置与工具信息");
         ui.add_space(8.0);
         if ui.available_width() >= 680.0 {
@@ -973,10 +1050,9 @@ impl AcceleratorApp {
 
     fn render_page_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, title: &str) {
         ui.horizontal(|ui| {
-            if ui
-                .add(subtle_button("返回", egui::vec2(68.0, 30.0), true))
-                .clicked()
-            {
+            let back_response = ui.add(subtle_button("返回", egui::vec2(68.0, 30.0), true));
+            self.register_drag_blocker(back_response.rect);
+            if back_response.clicked() {
                 self.navigate_to(ctx, UiPage::Launcher);
             }
             ui.add_space(6.0);
@@ -1001,7 +1077,7 @@ impl AcceleratorApp {
         self.current_page = page;
         match page {
             UiPage::Launcher => {
-                let size = egui::vec2(LAUNCHER_WINDOW_SIZE[0], LAUNCHER_WINDOW_SIZE[1]);
+                let size = launcher_window_size();
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
                 ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
@@ -1023,7 +1099,6 @@ impl AcceleratorApp {
     }
 
     fn render_launcher_footer(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, min_height: f32) {
-        let native_frame = use_native_wayland_frame();
         let response = egui::Frame::new()
             .fill(egui::Color32::from_rgb(24, 28, 34))
             .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(52, 58, 68)))
@@ -1034,18 +1109,15 @@ impl AcceleratorApp {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 0.0);
                 ui.horizontal(|ui| {
                     let total_width = ui.available_width();
-                    let detail_width = 118.0;
-                    let toggle_width = 132.0;
-                    let left_width = (total_width - detail_width - toggle_width - 16.0).max(180.0);
+                    let toggle_width = 240.0;
+                    let left_width = (total_width - toggle_width - 16.0).max(120.0);
 
                     ui.allocate_ui_with_layout(
                         egui::vec2(left_width, min_height - 4.0),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            if native_frame {
-                                ui.add(egui::Image::new((self.logo.id(), egui::vec2(20.0, 20.0))));
-                                ui.add_space(8.0);
-                            }
+                            ui.add(egui::Image::new((self.logo.id(), egui::vec2(20.0, 20.0))));
+                            ui.add_space(8.0);
                             ui.label(
                                 RichText::new("linux.do专属加速器")
                                     .font(FontId::proportional(11.2))
@@ -1059,22 +1131,9 @@ impl AcceleratorApp {
                         egui::vec2(toggle_width, min_height - 4.0),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            self.render_ip_preference_toggle(ui);
+                            self.render_ip_preference_toggle(ui, ctx);
                         },
                     );
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(launcher_secondary_button(
-                                "查看详情",
-                                egui::vec2(detail_width, 30.0),
-                                true,
-                            ))
-                            .clicked()
-                        {
-                            self.navigate_to(ctx, UiPage::Details);
-                        }
-                    });
                 });
             });
 
@@ -1213,6 +1272,7 @@ impl AcceleratorApp {
             detail_value_row(ui, "HTTP 监听", &self.http_listen_address());
             detail_value_row(ui, "HTTPS 监听", &self.https_listen_address());
             detail_value_row(ui, "解析优先", self.ip_preference_label());
+            detail_value_row(ui, "边缘节点", self.edge_node_label());
             detail_value_row(ui, "上游", &self.config.upstream);
             detail_value_row(
                 ui,
@@ -1268,7 +1328,7 @@ impl AcceleratorApp {
         });
     }
 
-    fn render_config_panel(&self, ui: &mut egui::Ui) {
+    fn render_config_panel(&mut self, ui: &mut egui::Ui) {
         panel_frame(
             egui::Color32::from_rgb(22, 26, 32),
             egui::Color32::from_rgb(50, 56, 64),
@@ -1282,7 +1342,40 @@ impl AcceleratorApp {
             );
             ui.add_space(6.0);
             detail_value_row(ui, "主配置", &self.config_path.display().to_string());
-            subtle_note(ui, "改完配置后重新开始加速即可生效。");
+            detail_value_row(ui, "当前边缘", self.edge_node_label());
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("边缘节点")
+                    .font(FontId::proportional(11.0))
+                    .strong()
+                    .color(egui::Color32::from_rgb(160, 170, 178)),
+            );
+            let input_enabled = !self.busy && !self.status.running;
+            let input_response = ui.add_enabled(
+                input_enabled,
+                egui::TextEdit::singleline(&mut self.edge_node_input)
+                    .hint_text("留空为自动，可填 IPv4 / IPv6 / 域名"),
+            );
+            self.register_drag_blocker(input_response.rect);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let save_response =
+                    ui.add(subtle_button("保存", egui::vec2(72.0, 28.0), input_enabled));
+                self.register_drag_blocker(save_response.rect);
+                if save_response.clicked() {
+                    self.set_edge_node_override();
+                }
+
+                let clear_enabled = input_enabled && !self.edge_node_input.trim().is_empty();
+                let clear_response =
+                    ui.add(subtle_button("清空", egui::vec2(72.0, 28.0), clear_enabled));
+                self.register_drag_blocker(clear_response.rect);
+                if clear_response.clicked() {
+                    self.edge_node_input.clear();
+                    self.set_edge_node_override();
+                }
+            });
+            subtle_note(ui, "边缘节点仅在停止加速后可修改；改完重新开始加速生效。");
         });
     }
 
@@ -1359,23 +1452,22 @@ impl AcceleratorApp {
 
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .add(subtle_button("取消", egui::vec2(92.0, 34.0), true))
-                        .clicked()
-                    {
+                    let cancel_response =
+                        ui.add(subtle_button("取消", egui::vec2(92.0, 34.0), true));
+                    self.register_drag_blocker(cancel_response.rect);
+                    if cancel_response.clicked() {
                         cancelled = true;
                     }
-                    if ui
-                        .add(filled_button(
-                            action.confirm_button(),
-                            egui::Color32::from_rgb(243, 180, 66),
-                            egui::Color32::from_rgb(24, 24, 22),
-                            egui::Color32::from_rgb(216, 158, 58),
-                            egui::vec2(172.0, 34.0),
-                            !self.busy,
-                        ))
-                        .clicked()
-                    {
+                    let confirm_response = ui.add(filled_button(
+                        action.confirm_button(),
+                        egui::Color32::from_rgb(243, 180, 66),
+                        egui::Color32::from_rgb(24, 24, 22),
+                        egui::Color32::from_rgb(216, 158, 58),
+                        egui::vec2(172.0, 34.0),
+                        !self.busy,
+                    ));
+                    self.register_drag_blocker(confirm_response.rect);
+                    if confirm_response.clicked() {
                         confirmed = true;
                     }
                 });
@@ -1522,7 +1614,7 @@ impl AcceleratorApp {
     }
 
     fn ensure_launcher_viewport(&self, ctx: &egui::Context) {
-        let size = egui::vec2(LAUNCHER_WINDOW_SIZE[0], LAUNCHER_WINDOW_SIZE[1]);
+        let size = launcher_window_size();
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
         ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
@@ -1544,6 +1636,7 @@ impl eframe::App for AcceleratorApp {
         self.sync_minimize_to_tray(ctx);
 
         self.poll_action();
+        self.drag_blockers.clear();
 
         let repaint_interval = self.repaint_interval();
         if self.last_refresh.elapsed() >= repaint_interval {
@@ -1552,7 +1645,13 @@ impl eframe::App for AcceleratorApp {
         }
 
         if self.current_page == UiPage::Launcher {
-            self.ensure_launcher_viewport(ctx);
+            if self.center_window_pending {
+                self.ensure_launcher_viewport(ctx);
+                if let Some(command) = egui::ViewportCommand::center_on_screen(ctx) {
+                    ctx.send_viewport_cmd(command);
+                }
+                self.center_window_pending = false;
+            }
         }
 
         egui::CentralPanel::default()
@@ -1565,25 +1664,23 @@ impl eframe::App for AcceleratorApp {
                 ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
                 if !use_native_wayland_frame() {
                     self.render_window_title_bar(ui, ctx);
-                    ui.add_space(6.0);
+                    ui.add_space(2.0);
                 } else {
                     ui.add_space(4.0);
                 }
 
                 match self.current_page {
                     UiPage::Launcher => {
-                        let native_frame = use_native_wayland_frame();
-                        let panel_width = ui.available_width().min(668.0);
-                        let panel_height = if native_frame { 152.0 } else { 146.0 };
-                        ui.add_space(if native_frame { 4.0 } else { 0.0 });
-                        ui.horizontal_centered(|ui| {
+                        let panel_width = ui.available_width();
+                        let panel_height = 172.0;
+                        ui.horizontal(|ui| {
                             ui.allocate_ui_with_layout(
                                 egui::vec2(panel_width, panel_height),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
-                                    ui.set_min_width(panel_width);
+                                    ui.set_width(panel_width);
                                     ui.set_min_height(panel_height);
-                                    egui::Frame::new()
+                                    let launcher_response = egui::Frame::new()
                                         .fill(egui::Color32::from_rgb(20, 24, 29))
                                         .stroke(egui::Stroke::new(
                                             1.0,
@@ -1594,9 +1691,17 @@ impl eframe::App for AcceleratorApp {
                                         .show(ui, |ui| {
                                             self.render_action_panel(ui, ctx);
                                         });
+                                    self.drag_area(
+                                        ui,
+                                        ctx,
+                                        launcher_response.response.rect,
+                                        "launcher_frame_drag",
+                                    );
                                 },
                             );
                         });
+                        let remaining_drag_rect = ui.available_rect_before_wrap();
+                        self.drag_area(ui, ctx, remaining_drag_rect, "launcher_remaining_drag");
                     }
                     UiPage::Details => {
                         panel_frame(
@@ -1604,15 +1709,18 @@ impl eframe::App for AcceleratorApp {
                             egui::Color32::from_rgb(44, 50, 58),
                         )
                         .show(ui, |ui| {
-                            egui::ScrollArea::vertical()
+                            let scroll_output = egui::ScrollArea::vertical()
                                 .auto_shrink([false, false])
                                 .show(ui, |ui| {
                                     self.render_page_header(ui, ctx, "详情与设置");
                                     self.render_details_content(ui);
                                 });
+                            self.register_drag_blocker(scroll_output.inner_rect);
                         });
                     }
                 }
+
+                self.drag_area(ui, ctx, ui.max_rect(), "window_full_drag");
             });
 
         self.show_confirm_action_dialog(ctx);
@@ -2130,13 +2238,13 @@ fn launcher_secondary_button(
 
     egui::Button::new(
         RichText::new(label)
-            .font(FontId::proportional(12.0))
+            .font(FontId::proportional(10.6))
             .strong()
             .color(text),
     )
     .fill(fill)
     .stroke(egui::Stroke::new(1.0, stroke))
-    .corner_radius(egui::CornerRadius::same(11))
+    .corner_radius(egui::CornerRadius::same(9))
     .min_size(min_size)
 }
 

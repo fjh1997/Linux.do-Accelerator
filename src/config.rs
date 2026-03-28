@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub managed_prefer_ipv6: bool,
     #[serde(default)]
     pub dns_hosts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub edge_node: Option<String>,
     #[serde(default = "default_proxy_domains")]
     pub proxy_domains: Vec<String>,
     #[serde(default)]
@@ -165,6 +167,7 @@ impl AppConfig {
                 .unwrap_or_else(default_doh_endpoints),
             managed_prefer_ipv6: default_managed_prefer_ipv6(),
             dns_hosts: BTreeMap::new(),
+            edge_node: None,
             proxy_domains: legacy_network
                 .as_ref()
                 .map(|value| value.proxy_domains.clone())
@@ -238,6 +241,13 @@ impl AppConfig {
         } else {
             &self.hosts_domains
         }
+    }
+
+    pub fn edge_node_override(&self) -> Option<&str> {
+        self.edge_node
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 }
 

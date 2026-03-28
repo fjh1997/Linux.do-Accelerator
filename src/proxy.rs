@@ -526,6 +526,11 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
     }
 
     let override_host = state.config.find_dns_host_override(host).map(str::to_owned);
+    let edge_override = state
+        .config
+        .edge_node_override()
+        .map(parse_dns_host_override)
+        .transpose()?;
     let cache_key = ResolveCacheKey {
         host: host.to_ascii_lowercase(),
         port,
@@ -586,8 +591,18 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
         }
         Ok((Vec::new(), None))
     };
-    let ((mut ips, addr_ttl), (extra_ips, extra_ttl)) =
-        tokio::try_join!(doh_lookup_ip_addrs(state, &target_host), public_lookup)?;
+    let ((mut ips, addr_ttl), (extra_ips, extra_ttl)) = if let Some(edge_override) = edge_override
+    {
+        let override_lookup = async {
+            match edge_override {
+                DnsHostOverride::Addresses(ips) => Ok((ips, None)),
+                DnsHostOverride::Alias(alias) => doh_lookup_ip_addrs(state, &alias).await,
+            }
+        };
+        tokio::try_join!(override_lookup, public_lookup)?
+    } else {
+        tokio::try_join!(doh_lookup_ip_addrs(state, &target_host), public_lookup)?
+    };
     ips.extend(extra_ips);
 
     if ips.is_empty() {

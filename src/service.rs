@@ -1,19 +1,23 @@
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 
 use crate::certs::{ensure_bundle, load_or_create_bundle};
 use crate::config::AppConfig;
 use crate::hosts::{
-    apply_hosts, backup_hosts_file, remove_hosts, restore_hosts_file, validate_hosts_backup_file,
+    apply_hosts, backup_hosts_file, hosts_are_applied, remove_hosts, restore_hosts_file,
+    validate_hosts_backup_file,
 };
 use crate::hosts_store::{BackupState, backup_state, clear_hosts_backup};
 use crate::paths::AppPaths;
 use crate::platform::{
     ensure_elevated, ensure_loopback_alias, flush_dns_cache, install_ca, is_process_running,
-    remove_loopback_alias, spawn_detached, terminate_process, uninstall_ca,
+    remove_loopback_alias, spawn_detached, terminate_process, terminate_process_force,
+    uninstall_ca,
 };
 use crate::proxy::run_proxy;
 use crate::runtime_log;
@@ -97,7 +101,7 @@ pub async fn run_foreground(config_path: Option<PathBuf>, with_setup: bool) -> R
     state::write_pid(&paths, pid)?;
     state::mark_running(&paths, pid)?;
     let result = run_proxy(config, bundle).await;
-    let _ = state::clear_pid(&paths);
+    let _ = state::clear_pid_if_matches(&paths, pid);
     match &result {
         Ok(_) => {
             log_info(&paths, "daemon", "加速服务已正常退出");
@@ -114,13 +118,14 @@ pub async fn run_foreground(config_path: Option<PathBuf>, with_setup: bool) -> R
 pub fn helper_start(config_path: Option<PathBuf>) -> Result<()> {
     let paths = resolve_paths(config_path)?;
     log_info(&paths, "helper-start", "收到启动请求，开始准备加速环境");
+    let config = AppConfig::load_or_create(&paths.config_path)?;
     let start_result = (|| -> Result<()> {
-        let config = AppConfig::load_or_create(&paths.config_path)?;
         ensure_elevated(&config, true)?;
         ensure_loopback_alias(&config)?;
 
-        let current = state::refresh(&paths)?;
+        let current = reconcile_running_state(&paths, &config)?;
         if current.running {
+            ensure_runtime_environment(&paths, &config)?;
             log_info(&paths, "helper-start", "检测到服务已在运行，跳过重复启动");
             return Ok(());
         }
@@ -143,9 +148,9 @@ pub fn helper_start(config_path: Option<PathBuf>) -> Result<()> {
         let child_pid = spawn_detached(&cli_binary, &args)?;
         state::write_pid(&paths, child_pid)?;
 
-        wait_until_running(&paths, Duration::from_secs(10))?;
+        wait_until_running(&paths, &config, Duration::from_secs(10))?;
         thread::sleep(Duration::from_millis(800));
-        let current = state::refresh(&paths)?;
+        let current = reconcile_running_state(&paths, &config)?;
         if !current.running {
             if let Some(error) = current.last_error {
                 bail!(error);
@@ -155,19 +160,34 @@ pub fn helper_start(config_path: Option<PathBuf>) -> Result<()> {
         Ok(())
     })();
 
-    if let Err(error) = &start_result {
-        let _ = remove_hosts(&paths);
-        let _ = remove_loopback_alias(
-            &AppConfig::load_or_create(&paths.config_path).unwrap_or_default(),
-        );
-        let _ = state::clear_pid(&paths);
-        let _ = state::mark_error(&paths, &format!("{error:#}"));
-        log_error(&paths, "helper-start", &format!("{error:#}"));
-    } else {
-        log_info(&paths, "helper-start", "加速服务启动成功");
-    }
+    match start_result {
+        Ok(()) => {
+            log_info(&paths, "helper-start", "加速服务启动成功");
+            Ok(())
+        }
+        Err(error) => {
+            if reconcile_running_state(&paths, &config)
+                .map(|state| state.running)
+                .unwrap_or(false)
+            {
+                log_warn(
+                    &paths,
+                    "helper-start",
+                    &format!(
+                        "启动流程报告异常，但检测到现有服务仍在运行，已修复状态：{error:#}"
+                    ),
+                );
+                return Ok(());
+            }
 
-    start_result
+            let _ = remove_hosts(&paths);
+            let _ = remove_loopback_alias(&config);
+            let _ = state::clear_pid(&paths);
+            let _ = state::mark_error(&paths, &format!("{error:#}"));
+            log_error(&paths, "helper-start", &format!("{error:#}"));
+            Err(error)
+        }
+    }
 }
 
 pub fn helper_stop(config_path: Option<PathBuf>) -> Result<()> {
@@ -176,10 +196,12 @@ pub fn helper_stop(config_path: Option<PathBuf>) -> Result<()> {
     let result = (|| -> Result<()> {
         let config = AppConfig::load_or_create(&paths.config_path)?;
         ensure_elevated(&config, true)?;
-        let mut issues = Vec::new();
         if let Some(issue) = terminate_running_service(&paths)? {
-            issues.push(issue);
+            let _ = reconcile_running_state(&paths, &config);
+            bail!(issue);
         }
+
+        let mut issues = Vec::new();
         let (hosts_message, hosts_warning) = restore_hosts_after_stop(&paths);
         if let Some(warning) = hosts_warning {
             issues.push(warning);
@@ -359,13 +381,53 @@ pub fn uninstall_certificate(config_path: Option<PathBuf>) -> Result<()> {
 
 pub fn status(config_path: Option<PathBuf>) -> Result<state::ServiceState> {
     let paths = resolve_paths(config_path)?;
-    state::refresh(&paths)
+    let config = AppConfig::load_or_create(&paths.config_path)?;
+    reconcile_running_state(&paths, &config)
 }
 
-fn wait_until_running(paths: &AppPaths, timeout: Duration) -> Result<()> {
+fn reconcile_running_state(paths: &AppPaths, config: &AppConfig) -> Result<state::ServiceState> {
+    let current = state::refresh(paths)?;
+    if current.running {
+        return Ok(current);
+    }
+
+    if let Some(pid) = discover_running_daemon_pid(paths) {
+        state::write_pid(paths, pid)?;
+        state::mark_running(paths, pid)?;
+        return state::refresh(paths);
+    }
+
+    if proxy_ports_ready(config) {
+        let repaired = state::ServiceState {
+            running: true,
+            pid: None,
+            status_text: "加速中".to_string(),
+            last_error: None,
+            updated_at: now_ts(),
+        };
+        state::write(paths, &repaired)?;
+        return Ok(repaired);
+    }
+
+    Ok(current)
+}
+
+fn ensure_runtime_environment(paths: &AppPaths, config: &AppConfig) -> Result<()> {
+    ensure_loopback_alias(config)?;
+
+    if !hosts_are_applied(config)? {
+        apply_hosts(config, paths)?;
+        let _ = flush_dns_cache();
+        log_info(&paths, "helper-start", "已修复缺失的 hosts 接管规则");
+    }
+
+    Ok(())
+}
+
+fn wait_until_running(paths: &AppPaths, config: &AppConfig, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        let state = state::refresh(paths)?;
+        let state = reconcile_running_state(paths, config)?;
         if state.running {
             return Ok(());
         }
@@ -376,6 +438,63 @@ fn wait_until_running(paths: &AppPaths, timeout: Duration) -> Result<()> {
     }
 
     bail!("daemon start timed out")
+}
+
+fn discover_running_daemon_pid(paths: &AppPaths) -> Option<u32> {
+    #[cfg(target_family = "unix")]
+    {
+        let output = Command::new("ps")
+            .args(["ax", "-o", "pid=,command="])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+
+        let config_marker = paths.config_path.to_string_lossy();
+        let binary_marker = cli_binary_name();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let mut parts = trimmed.splitn(2, char::is_whitespace);
+            let pid = parts.next()?.trim().parse::<u32>().ok()?;
+            let command = parts.next().unwrap_or("").trim();
+            if command.contains(binary_marker)
+                && command.contains(" daemon")
+                && command.contains(config_marker.as_ref())
+                && is_process_running(pid)
+            {
+                return Some(pid);
+            }
+        }
+    }
+
+    None
+}
+
+fn proxy_ports_ready(config: &AppConfig) -> bool {
+    tcp_port_ready(&config.listen_host, config.http_port)
+        && tcp_port_ready(&config.listen_host, config.https_port)
+}
+
+fn tcp_port_ready(host: &str, port: u16) -> bool {
+    let Ok(addresses) = format!("{host}:{port}").to_socket_addrs() else {
+        return false;
+    };
+
+    addresses
+        .into_iter()
+        .any(|address| TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_ok())
+}
+
+fn now_ts() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn ensure_service_stopped_for_hosts_change(paths: &AppPaths, command_name: &str) -> Result<()> {
@@ -395,9 +514,16 @@ fn terminate_running_service(paths: &AppPaths) -> Result<Option<String>> {
                 )));
             }
             if let Err(error) = wait_until_stopped(pid, Duration::from_secs(5)) {
-                return Ok(Some(format!(
-                    "running service pid {pid} did not stop cleanly: {error:#}"
-                )));
+                if let Err(force_error) = terminate_process_force(pid) {
+                    return Ok(Some(format!(
+                        "running service pid {pid} did not stop after SIGTERM ({error:#}); SIGKILL also failed: {force_error:#}"
+                    )));
+                }
+                if let Err(force_wait_error) = wait_until_stopped(pid, Duration::from_secs(3)) {
+                    return Ok(Some(format!(
+                        "running service pid {pid} did not stop cleanly after SIGTERM ({error:#}) and SIGKILL ({force_wait_error:#})"
+                    )));
+                }
             }
         }
     }

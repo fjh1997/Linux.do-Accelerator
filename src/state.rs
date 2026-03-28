@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -55,8 +56,12 @@ pub fn refresh(paths: &AppPaths) -> Result<ServiceState> {
             state.pid = Some(pid);
             changed = true;
         }
+        if state.last_error.is_some() {
+            state.last_error = None;
+            changed = true;
+        }
         let expected = format!("加速中，PID {pid}");
-        if state.last_error.is_none() && state.status_text != expected {
+        if state.status_text != expected {
             state.status_text = expected;
             changed = true;
         }
@@ -83,8 +88,7 @@ pub fn refresh(paths: &AppPaths) -> Result<ServiceState> {
 pub fn write(paths: &AppPaths, state: &ServiceState) -> Result<()> {
     let content =
         serde_json::to_string_pretty(state).context("failed to serialize service state")?;
-    fs::write(&paths.state_path, content)
-        .with_context(|| format!("failed to write {}", paths.state_path.display()))?;
+    replace_file(&paths.state_path, content.as_bytes())?;
     sync_user_ownership(&paths.state_path)?;
     Ok(())
 }
@@ -132,8 +136,7 @@ pub fn mark_error(paths: &AppPaths, message: &str) -> Result<()> {
 }
 
 pub fn write_pid(paths: &AppPaths, pid: u32) -> Result<()> {
-    fs::write(&paths.pid_path, pid.to_string())
-        .with_context(|| format!("failed to write {}", paths.pid_path.display()))?;
+    replace_file(&paths.pid_path, pid.to_string().as_bytes())?;
     sync_user_ownership(&paths.pid_path)?;
     Ok(())
 }
@@ -149,6 +152,15 @@ pub fn read_pid(paths: &AppPaths) -> Result<Option<u32>> {
     Ok(pid)
 }
 
+pub fn clear_pid_if_matches(paths: &AppPaths, expected_pid: u32) -> Result<bool> {
+    if read_pid(paths)? != Some(expected_pid) {
+        return Ok(false);
+    }
+
+    clear_pid(paths)?;
+    Ok(true)
+}
+
 pub fn clear_pid(paths: &AppPaths) -> Result<()> {
     if paths.pid_path.exists() {
         fs::remove_file(&paths.pid_path)
@@ -162,4 +174,35 @@ fn now_ts() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
+}
+
+fn replace_file(path: &Path, content: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("state");
+    let tmp_path = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+
+    fs::write(&tmp_path, content)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+
+    if path.exists() {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+            }
+        }
+    }
+
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("failed to move {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
 }
