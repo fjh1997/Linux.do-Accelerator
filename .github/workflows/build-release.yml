@@ -91,7 +91,11 @@ jobs:
 
       - name: Install dmgbuild
         if: runner.os == 'macOS'
-        run: python3 -m pip install --user dmgbuild
+        shell: bash
+        run: |
+          python3 -m venv .dmgbuild-venv
+          ./.dmgbuild-venv/bin/pip install dmgbuild
+          echo "${PWD}/.dmgbuild-venv/bin" >> "${GITHUB_PATH}"
 
       - name: Build binary
         run: cargo build --release --locked --bin linuxdo-accelerator
