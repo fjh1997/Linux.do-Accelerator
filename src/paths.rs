@@ -15,6 +15,7 @@ pub struct AppPaths {
     pub cert_dir: PathBuf,
     pub state_path: PathBuf,
     pub pid_path: PathBuf,
+    pub ui_lease_path: PathBuf,
     pub runtime_log_path: PathBuf,
     pub hosts_backup_path: PathBuf,
     pub hosts_backup_meta_path: PathBuf,
@@ -52,6 +53,7 @@ impl AppPaths {
         let cert_dir = data_dir.join("certs");
         let state_path = runtime_dir.join("service-state.json");
         let pid_path = runtime_dir.join("linuxdo-accelerator.pid");
+        let ui_lease_path = runtime_dir.join("ui-lease.json");
         let runtime_log_path = runtime_dir.join("operations.log");
         let hosts_backup_path = runtime_dir.join("hosts.backup");
         let hosts_backup_meta_path = runtime_dir.join("hosts.backup.json");
@@ -64,6 +66,7 @@ impl AppPaths {
             cert_dir,
             state_path,
             pid_path,
+            ui_lease_path,
             runtime_log_path,
             hosts_backup_path,
             hosts_backup_meta_path,

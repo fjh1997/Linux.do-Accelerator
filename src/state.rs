@@ -18,6 +18,12 @@ pub struct ServiceState {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiLeaseState {
+    pub owner_pid: u32,
+    pub updated_at: u64,
+}
+
 impl Default for ServiceState {
     fn default() -> Self {
         Self {
@@ -165,6 +171,38 @@ pub fn clear_pid(paths: &AppPaths) -> Result<()> {
     if paths.pid_path.exists() {
         fs::remove_file(&paths.pid_path)
             .with_context(|| format!("failed to remove {}", paths.pid_path.display()))?;
+    }
+    Ok(())
+}
+
+pub fn read_ui_lease(paths: &AppPaths) -> Result<Option<UiLeaseState>> {
+    if !paths.ui_lease_path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&paths.ui_lease_path)
+        .with_context(|| format!("failed to read {}", paths.ui_lease_path.display()))?;
+    let lease = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", paths.ui_lease_path.display()))?;
+    Ok(Some(lease))
+}
+
+pub fn touch_ui_lease(paths: &AppPaths, owner_pid: u32) -> Result<()> {
+    let lease = UiLeaseState {
+        owner_pid,
+        updated_at: now_ts(),
+    };
+    let content =
+        serde_json::to_string_pretty(&lease).context("failed to serialize ui lease state")?;
+    replace_file(&paths.ui_lease_path, content.as_bytes())?;
+    sync_user_ownership(&paths.ui_lease_path)?;
+    Ok(())
+}
+
+pub fn clear_ui_lease(paths: &AppPaths) -> Result<()> {
+    if paths.ui_lease_path.exists() {
+        fs::remove_file(&paths.ui_lease_path)
+            .with_context(|| format!("failed to remove {}", paths.ui_lease_path.display()))?;
     }
     Ok(())
 }

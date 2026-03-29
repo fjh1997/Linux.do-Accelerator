@@ -1,10 +1,13 @@
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
+use tokio::sync::watch;
 
 use crate::certs::{ensure_bundle, load_or_create_bundle};
 use crate::config::AppConfig;
@@ -100,8 +103,25 @@ pub async fn run_foreground(config_path: Option<PathBuf>, with_setup: bool) -> R
     let pid = std::process::id();
     state::write_pid(&paths, pid)?;
     state::mark_running(&paths, pid)?;
-    let result = run_proxy(config, paths.clone(), bundle).await;
+    let ui_managed_shutdown = Arc::new(AtomicBool::new(false));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let watchdog = spawn_ui_lease_watchdog(
+        paths.clone(),
+        ui_managed_shutdown.clone(),
+        shutdown_tx,
+    );
+    let result = run_proxy(config.clone(), paths.clone(), bundle, shutdown_rx).await;
+    watchdog.abort();
     let _ = state::clear_pid_if_matches(&paths, pid);
+    if ui_managed_shutdown.load(Ordering::SeqCst) {
+        let _ = cleanup_after_ui_disconnect(&paths, &config);
+        log_info(
+            &paths,
+            "daemon",
+            "已检测到前端异常退出，自动停止本地监听并恢复系统状态",
+        );
+        return Ok(());
+    }
     match &result {
         Ok(_) => {
             log_info(&paths, "daemon", "加速服务已正常退出");
@@ -212,6 +232,9 @@ pub fn helper_stop(config_path: Option<PathBuf>) -> Result<()> {
         if let Err(error) = state::clear_pid(&paths) {
             issues.push(format!("failed to clear pid file: {error:#}"));
         }
+        if let Err(error) = state::clear_ui_lease(&paths) {
+            issues.push(format!("failed to clear ui lease: {error:#}"));
+        }
         let _ = flush_dns_cache();
 
         let status_message = if issues.is_empty() {
@@ -259,6 +282,9 @@ pub fn cleanup(config_path: Option<PathBuf>) -> Result<()> {
         }
         if let Err(error) = state::clear_pid(&paths) {
             issues.push(format!("failed to clear pid file: {error:#}"));
+        }
+        if let Err(error) = state::clear_ui_lease(&paths) {
+            issues.push(format!("failed to clear ui lease: {error:#}"));
         }
 
         let status_message = if issues.is_empty() {
@@ -662,6 +688,86 @@ fn wait_until_stopped(pid: u32, timeout: Duration) -> Result<()> {
     }
 
     bail!("process {pid} did not stop within {:?}", timeout)
+}
+
+fn cleanup_after_ui_disconnect(paths: &AppPaths, config: &AppConfig) -> Result<()> {
+    let mut issues = Vec::new();
+    let (hosts_message, hosts_warning) = restore_hosts_after_stop(paths);
+    if let Some(warning) = hosts_warning {
+        issues.push(warning);
+    }
+    if let Err(error) = remove_loopback_alias(config) {
+        issues.push(format!("failed to remove loopback alias: {error:#}"));
+    }
+    if let Err(error) = state::clear_pid(paths) {
+        issues.push(format!("failed to clear pid file: {error:#}"));
+    }
+    if let Err(error) = state::clear_ui_lease(paths) {
+        issues.push(format!("failed to clear ui lease: {error:#}"));
+    }
+    let _ = flush_dns_cache();
+
+    let status_message = if issues.is_empty() {
+        format!("前端已退出，自动停止加速并{hosts_message}")
+    } else {
+        format!("前端已退出，已停止监听，但存在残留清理问题：{hosts_message}")
+    };
+    let _ = state::mark_stopped(paths, &status_message);
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        bail!(issues.join("; "));
+    }
+}
+
+fn spawn_ui_lease_watchdog(
+    paths: AppPaths,
+    ui_managed_shutdown: Arc<AtomicBool>,
+    shutdown_tx: watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if state::read_ui_lease(&paths).ok().flatten().is_none() {
+            return;
+        }
+        let stale_after = Duration::from_secs(8);
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let Some(lease) = state::read_ui_lease(&paths).ok().flatten() else {
+                ui_managed_shutdown.store(true, Ordering::SeqCst);
+                let _ = runtime_log::append(
+                    &paths,
+                    "WARN",
+                    "ui-watchdog",
+                    "ui lease missing while daemon is ui-managed; requesting shutdown",
+                );
+                let _ = shutdown_tx.send(true);
+                break;
+            };
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(lease.updated_at);
+            let stale = now.saturating_sub(lease.updated_at) >= stale_after.as_secs();
+            let owner_dead = !is_process_running(lease.owner_pid);
+            if stale || owner_dead {
+                ui_managed_shutdown.store(true, Ordering::SeqCst);
+                let _ = runtime_log::append(
+                    &paths,
+                    "WARN",
+                    "ui-watchdog",
+                    &format!(
+                        "ui lease expired owner_pid={} stale={} owner_dead={}; requesting shutdown",
+                        lease.owner_pid, stale, owner_dead
+                    ),
+                );
+                let _ = shutdown_tx.send(true);
+                break;
+            }
+        }
+    })
 }
 
 fn log_info(paths: &AppPaths, action: &str, message: &str) {

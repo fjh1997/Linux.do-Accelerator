@@ -25,7 +25,7 @@ use rustls::crypto::{aws_lc_rs, ring};
 use rustls::pki_types::{EchConfigListBytes, ServerName};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
@@ -114,7 +114,12 @@ const DOH_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const DOH_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 
-pub async fn run_proxy(config: AppConfig, paths: AppPaths, bundle: CertificateBundle) -> Result<()> {
+pub async fn run_proxy(
+    config: AppConfig,
+    paths: AppPaths,
+    bundle: CertificateBundle,
+    shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
     let doh_client = Client::builder()
         .connect_timeout(DOH_CONNECT_TIMEOUT)
         .timeout(DOH_REQUEST_TIMEOUT)
@@ -143,14 +148,14 @@ pub async fn run_proxy(config: AppConfig, paths: AppPaths, bundle: CertificateBu
     let https_state = state.clone();
 
     tokio::try_join!(
-        run_http_redirect(http_state),
-        run_https_proxy(https_state, bundle)
+        run_http_redirect(http_state, shutdown_rx.clone()),
+        run_https_proxy(https_state, bundle, shutdown_rx)
     )?;
 
     Ok(())
 }
 
-async fn run_http_redirect(state: Arc<AppState>) -> Result<()> {
+async fn run_http_redirect(state: Arc<AppState>, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
     let address = format!("{}:{}", state.config.listen_host, state.config.http_port);
     let listener = TcpListener::bind(&address)
         .await
@@ -159,10 +164,17 @@ async fn run_http_redirect(state: Arc<AppState>) -> Result<()> {
     println!("http redirect listening on http://{address}");
 
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .context("failed to accept HTTP socket")?;
+        let (stream, _) = tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            result = listener.accept() => {
+                result.context("failed to accept HTTP socket")?
+            }
+        };
         let state = state.clone();
 
         tokio::spawn(async move {
@@ -175,9 +187,15 @@ async fn run_http_redirect(state: Arc<AppState>) -> Result<()> {
             }
         });
     }
+
+    Ok(())
 }
 
-async fn run_https_proxy(state: Arc<AppState>, bundle: CertificateBundle) -> Result<()> {
+async fn run_https_proxy(
+    state: Arc<AppState>,
+    bundle: CertificateBundle,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
     let certs = load_certificate_chain(&bundle)?;
     let key = load_private_key(&bundle.server_key_path)?;
     let provider = ring::default_provider();
@@ -199,10 +217,17 @@ async fn run_https_proxy(state: Arc<AppState>, bundle: CertificateBundle) -> Res
     println!("https proxy listening on https://{address}");
 
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .context("failed to accept HTTPS socket")?;
+        let (stream, _) = tokio::select! {
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            result = listener.accept() => {
+                result.context("failed to accept HTTPS socket")?
+            }
+        };
         let acceptor = acceptor.clone();
         let state = state.clone();
 
@@ -228,6 +253,8 @@ async fn run_https_proxy(state: Arc<AppState>, bundle: CertificateBundle) -> Res
             }
         });
     }
+
+    Ok(())
 }
 
 async fn redirect_handler(

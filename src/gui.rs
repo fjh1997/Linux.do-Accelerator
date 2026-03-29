@@ -1,5 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -29,7 +31,7 @@ use crate::platform::spawn_detached;
 use crate::platform::{apply_app_window_icon, update_windows_shortcuts_for_exe};
 use crate::runtime_log::{append as append_runtime_log, read_recent_lines};
 use crate::service;
-use crate::state::ServiceState;
+use crate::state::{self, ServiceState};
 
 const APP_WINDOW_TITLE: &str = "Linux.do Accelerator";
 const APP_ID: &str = "linuxdo-accelerator";
@@ -125,6 +127,8 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
     let config_for_timeout = config_path.clone();
+    let tray_lease_stop = spawn_ui_lease_heartbeat(config_path.clone());
+    let tray_lease_stop_in_loop = tray_lease_stop.clone();
 
     let _menu_handler = MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if event.id == show_id {
@@ -140,6 +144,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
                 TrayCommand::Restore => {
                     log_linux_tray_event("tray-shell restore clicked");
                     let _ = tray_icon.set_visible(false);
+                    tray_lease_stop_in_loop.store(true, Ordering::Relaxed);
                     let _ = spawn_ui_process(&config_for_timeout);
                     gtk::main_quit();
                     return ControlFlow::Break;
@@ -147,6 +152,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
                 TrayCommand::Quit => {
                     log_linux_tray_event("tray-shell quit clicked");
                     let _ = tray_icon.set_visible(false);
+                    tray_lease_stop_in_loop.store(true, Ordering::Relaxed);
                     gtk::main_quit();
                     return ControlFlow::Break;
                 }
@@ -157,6 +163,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
     });
 
     gtk::main();
+    tray_lease_stop.store(true, Ordering::Relaxed);
     log_linux_tray_event("tray-shell exit");
     Ok(())
 }
@@ -175,6 +182,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
 
     struct TrayShellApp {
         config_path: PathBuf,
+        lease_stop: Arc<AtomicBool>,
         tray_icon: Option<TrayIcon>,
         show_item: MenuItem,
         quit_item: MenuItem,
@@ -226,10 +234,12 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
         fn user_event(&mut self, event_loop: &ActiveEventLoop, event: TrayShellEvent) {
             match event {
                 TrayShellEvent::Restore => {
+                    self.lease_stop.store(true, Ordering::Relaxed);
                     let _ = spawn_ui_process(&self.config_path);
                     event_loop.exit();
                 }
                 TrayShellEvent::Quit => {
+                    self.lease_stop.store(true, Ordering::Relaxed);
                     event_loop.exit();
                 }
             }
@@ -240,6 +250,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
     let quit_item = MenuItem::with_id("tray-quit", "退出程序", true, None);
     let show_id = show_item.id().clone();
     let quit_id = quit_item.id().clone();
+    let tray_lease_stop = spawn_ui_lease_heartbeat(config_path.clone());
 
     let event_loop = EventLoop::<TrayShellEvent>::with_user_event()
         .build()
@@ -272,6 +283,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
 
     let mut app = TrayShellApp {
         config_path,
+        lease_stop: tray_lease_stop.clone(),
         tray_icon: None,
         show_item,
         quit_item,
@@ -279,6 +291,7 @@ pub fn run_tray_shell(config_path: PathBuf) -> Result<()> {
     let result = event_loop
         .run_app(&mut app)
         .map_err(|error| anyhow::anyhow!(error.to_string()));
+    tray_lease_stop.store(true, Ordering::Relaxed);
     TrayIconEvent::set_event_handler::<fn(TrayIconEvent)>(None);
     MenuEvent::set_event_handler::<fn(MenuEvent)>(None);
     result
@@ -288,6 +301,8 @@ struct AcceleratorApp {
     config_path: PathBuf,
     config: AppConfig,
     edge_node_input: String,
+    owns_ui_lease: bool,
+    ui_lease_stop: Option<Arc<AtomicBool>>,
     status: ServiceState,
     recent_logs: Vec<String>,
     feedback: String,
@@ -365,6 +380,15 @@ impl AcceleratorApp {
         let edge_node_input = config.edge_node_override().unwrap_or_default().to_string();
         let config_modified_at = file_modified_at(&config_path);
         let status = service::status(Some(config_path.clone())).unwrap_or_default();
+        let owns_ui_lease = service::resolve_paths(Some(config_path.clone()))
+            .ok()
+            .and_then(|paths| state::read_ui_lease(&paths).ok().flatten())
+            .is_some();
+        let ui_lease_stop = if owns_ui_lease {
+            Some(spawn_ui_lease_heartbeat(config_path.clone()))
+        } else {
+            None
+        };
         let recent_logs = load_recent_runtime_logs(&config_path);
         let runtime_log_modified_at = runtime_log_file_modified_at(&config_path);
         #[cfg(target_os = "windows")]
@@ -388,6 +412,8 @@ impl AcceleratorApp {
             config_path,
             config,
             edge_node_input,
+            owns_ui_lease,
+            ui_lease_stop,
             status,
             recent_logs,
             feedback: String::new(),
@@ -478,6 +504,16 @@ impl AcceleratorApp {
             return;
         }
 
+        if matches!(action, GuiAction::Start) {
+            self.owns_ui_lease = self.touch_ui_lease().is_ok();
+            if self.owns_ui_lease {
+                if let Some(stop) = self.ui_lease_stop.take() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                self.ui_lease_stop = Some(spawn_ui_lease_heartbeat(self.config_path.clone()));
+            }
+        }
+
         self.busy = true;
         self.feedback = action.pending_message().to_string();
 
@@ -512,6 +548,11 @@ impl AcceleratorApp {
                                     self.status.running = false;
                                     self.status.status_text = "已停止".to_string();
                                     self.status.last_error = None;
+                                    if let Some(stop) = self.ui_lease_stop.take() {
+                                        stop.store(true, Ordering::Relaxed);
+                                    }
+                                    self.clear_ui_lease();
+                                    self.owns_ui_lease = false;
                                     self.optimistic_running = Some((false, deadline));
                                 }
                                 None => {}
@@ -521,6 +562,11 @@ impl AcceleratorApp {
                             self.optimistic_running = None;
                             match self.pending_action {
                                 Some(GuiAction::Start) => {
+                                    if let Some(stop) = self.ui_lease_stop.take() {
+                                        stop.store(true, Ordering::Relaxed);
+                                    }
+                                    self.clear_ui_lease();
+                                    self.owns_ui_lease = false;
                                     self.status.running = false;
                                     self.status.pid = None;
                                     self.status.status_text = "启动失败".to_string();
@@ -1567,6 +1613,18 @@ impl AcceleratorApp {
         }
     }
 
+    fn touch_ui_lease(&self) -> Result<()> {
+        let paths = service::resolve_paths(Some(self.config_path.clone()))?;
+        state::touch_ui_lease(&paths, std::process::id())
+    }
+
+    fn clear_ui_lease(&self) {
+        if let Ok(paths) = service::resolve_paths(Some(self.config_path.clone())) {
+            let _ = state::clear_ui_lease(&paths);
+        }
+    }
+
+
     #[cfg(target_os = "windows")]
     fn restore_from_tray(&mut self, ctx: &egui::Context) {
         self.hidden_to_tray = false;
@@ -1645,8 +1703,8 @@ impl eframe::App for AcceleratorApp {
         }
 
         if self.current_page == UiPage::Launcher {
+            self.ensure_launcher_viewport(ctx);
             if self.center_window_pending {
-                self.ensure_launcher_viewport(ctx);
                 if let Some(command) = egui::ViewportCommand::center_on_screen(ctx) {
                     ctx.send_viewport_cmd(command);
                 }
@@ -1726,6 +1784,16 @@ impl eframe::App for AcceleratorApp {
         self.show_confirm_action_dialog(ctx);
 
         ctx.request_repaint_after(repaint_interval);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(stop) = self.ui_lease_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if !self.status.running {
+            self.clear_ui_lease();
+            self.owns_ui_lease = false;
+        }
     }
 }
 
@@ -1874,6 +1942,35 @@ fn runtime_log_file_modified_at(config_path: &Path) -> Option<SystemTime> {
 
 fn file_modified_at(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
+}
+
+fn ui_lease_exists(config_path: &Path) -> bool {
+    service::resolve_paths(Some(config_path.to_path_buf()))
+        .ok()
+        .and_then(|paths| state::read_ui_lease(&paths).ok().flatten())
+        .is_some()
+}
+
+fn touch_ui_lease_for_config(config_path: &Path) {
+    if let Ok(paths) = service::resolve_paths(Some(config_path.to_path_buf())) {
+        let _ = state::touch_ui_lease(&paths, std::process::id());
+    }
+}
+
+fn spawn_ui_lease_heartbeat(config_path: PathBuf) -> Arc<AtomicBool> {
+    let stop = Arc::new(AtomicBool::new(false));
+    if !ui_lease_exists(&config_path) {
+        return stop;
+    }
+
+    let stop_flag = stop.clone();
+    thread::spawn(move || {
+        while !stop_flag.load(Ordering::Relaxed) {
+            touch_ui_lease_for_config(&config_path);
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
+    stop
 }
 
 #[cfg(target_os = "macos")]
