@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.14
+
+- 修复 Windows 上前端仍在运行时被误判为“前端异常退出”的问题；守护进程现在仅在 UI lease 真正过期或持续缺失后才自动停止。
+- 修复 UI lease / 状态文件在 Windows 上的原子替换稳定性，降低共享占用或瞬时文件缺失导致的误判概率。
+- 修复 Edge 预发布包内显示的版本号始终停留在 `0.1.12` 的问题；现在会正确显示实际的 edge / release 构建版本。
+- 调整 GitHub Actions 的 release / edge 构建流程，把版本号注入到桌面端构建环境中，保持包名、界面显示和发布版本一致。
+- macOS 打包流程改为先构建 `.app` 再生成 `.dmg`，并修正 DMG 安装界面的背景布局与图标大小。
+
 ## v0.1.10
 
 - 增加桌面端和 Android 端的 TTL-based DoH 缓存，减少重复解析并加快 `linux.do`、`cdn.linux.do`、`cdn3.linux.do`、`ping.linux.do` 等域名的二次访问。
