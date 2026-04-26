@@ -1135,9 +1135,15 @@ impl AcceleratorApp {
                 self.set_autostart(enabled);
             }
             ui.add_space(4.0);
+            #[cfg(target_os = "windows")]
+            let autostart_note =
+                "勾选后系统登录时会通过计划任务更早地直接启动后台加速；首次开启或关闭时需要确认一次管理员/UAC 授权，后续开机无需再次确认。";
+            #[cfg(not(target_os = "windows"))]
+            let autostart_note =
+                "勾选后系统登录时会自动拉起本程序并申请权限启动加速；首次启动仍需要在系统弹窗中确认管理员/UAC 授权。";
             subtle_note(
                 ui,
-                "勾选后系统登录时会自动拉起本程序并申请权限启动加速；首次启动仍需要在系统弹窗中确认管理员/UAC 授权。",
+                autostart_note,
             );
         });
     }
@@ -1748,7 +1754,10 @@ impl AcceleratorApp {
                 self.autostart_enabled = enabled;
                 self.config.autostart = enabled;
                 if let Err(error) = self.save_current_config() {
-                    self.feedback = format!("已切换开机自启，但保存配置失败: {}", format_error_chain(&error));
+                    self.feedback = format!(
+                        "已切换开机自启，但保存配置失败: {}",
+                        format_error_chain(&error)
+                    );
                     return;
                 }
                 self.feedback = if enabled {

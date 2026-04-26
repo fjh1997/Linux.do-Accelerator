@@ -16,7 +16,7 @@ pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
-    /// Launch the GUI and immediately start acceleration (used by OS auto-start entries)
+    /// Launch the GUI and immediately start acceleration (used by macOS/Linux auto-start entries)
     #[arg(long)]
     pub autostart: bool,
 

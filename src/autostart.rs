@@ -2,13 +2,17 @@ use std::path::Path;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 
+#[cfg(target_os = "windows")]
+use crate::platform::{is_elevated, run_elevated};
 use anyhow::{Context, Result, bail};
 
 #[cfg(target_os = "macos")]
 const AUTOSTART_LABEL: &str = "io.linuxdo.accelerator";
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 const AUTOSTART_DISPLAY_NAME: &str = "Linux.do Accelerator";
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "windows")]
+const AUTOSTART_TASK_NAME: &str = AUTOSTART_DISPLAY_NAME;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const AUTOSTART_FLAG: &str = "--autostart";
 
 pub fn enable(config_path: &Path) -> Result<()> {
@@ -32,38 +36,100 @@ fn enable_for_exe(exe: &Path, config_path: &Path) -> Result<()> {
 fn platform_enable(exe: &Path, config_path: &Path) -> Result<()> {
     use std::process::Command;
 
+    if !is_elevated() {
+        return rerun_windows_autostart_command(exe, Some(config_path), "enable-autostart");
+    }
+
     let exe = absolute_display_path(exe);
     let config = absolute_display_path(config_path);
-    let value = format!(
-        "\"{}\" --config \"{}\" {} gui",
-        exe, config, AUTOSTART_FLAG
-    );
+    let value = windows_task_action(&exe, &config);
 
-    let mut command = Command::new("reg");
+    let mut command = Command::new("schtasks");
     command.args([
-        "add",
-        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        "/v",
-        AUTOSTART_DISPLAY_NAME,
-        "/t",
-        "REG_SZ",
-        "/d",
+        "/create",
+        "/tn",
+        AUTOSTART_TASK_NAME,
+        "/sc",
+        "onlogon",
+        "/rl",
+        "HIGHEST",
+        "/tr",
         &value,
         "/f",
     ]);
     hide_windows_window(&mut command);
-    let output = command.output().context("failed to invoke reg.exe")?;
+    let output = command.output().context("failed to invoke schtasks.exe")?;
     if !output.status.success() {
         bail!(
-            "reg add failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "schtasks /create failed: {}",
+            windows_command_message(&output)
         );
     }
+    remove_legacy_windows_run_entry()?;
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn platform_disable() -> Result<()> {
+    use std::process::Command;
+
+    let scheduled_task_exists = windows_scheduled_task_exists()?;
+    if scheduled_task_exists && !is_elevated() {
+        let exe = std::env::current_exe().context("failed to locate current executable")?;
+        return rerun_windows_autostart_command(&exe, None, "disable-autostart");
+    }
+
+    if scheduled_task_exists {
+        let mut command = Command::new("schtasks");
+        command.args(["/delete", "/tn", AUTOSTART_TASK_NAME, "/f"]);
+        hide_windows_window(&mut command);
+        let output = command.output().context("failed to invoke schtasks.exe")?;
+        if !output.status.success() {
+            bail!(
+                "schtasks /delete failed: {}",
+                windows_command_message(&output)
+            );
+        }
+    }
+
+    remove_legacy_windows_run_entry()?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_is_enabled() -> Result<bool> {
+    windows_scheduled_task_exists()
+}
+
+#[cfg(target_os = "windows")]
+fn rerun_windows_autostart_command(
+    executable: &Path,
+    config_path: Option<&Path>,
+    subcommand: &str,
+) -> Result<()> {
+    let mut args = Vec::with_capacity(3);
+    if let Some(config_path) = config_path {
+        args.push("--config".to_string());
+        args.push(absolute_display_path(config_path));
+    }
+    args.push(subcommand.to_string());
+    run_elevated(executable, &args)
+        .with_context(|| format!("failed to rerun {subcommand} with administrator privileges"))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_scheduled_task_exists() -> Result<bool> {
+    use std::process::Command;
+
+    let mut command = Command::new("schtasks");
+    command.args(["/query", "/tn", AUTOSTART_TASK_NAME]);
+    hide_windows_window(&mut command);
+    let output = command.output().context("failed to invoke schtasks.exe")?;
+    Ok(output.status.success())
+}
+
+#[cfg(target_os = "windows")]
+fn remove_legacy_windows_run_entry() -> Result<()> {
     use std::process::Command;
 
     let mut command = Command::new("reg");
@@ -90,19 +156,17 @@ fn platform_disable() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn platform_is_enabled() -> Result<bool> {
-    use std::process::Command;
+fn windows_task_action(exe: &str, config: &str) -> String {
+    format!("\"{exe}\" --config \"{config}\" helper-start")
+}
 
-    let mut command = Command::new("reg");
-    command.args([
-        "query",
-        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        "/v",
-        AUTOSTART_DISPLAY_NAME,
-    ]);
-    hide_windows_window(&mut command);
-    let output = command.output().context("failed to invoke reg.exe")?;
-    Ok(output.status.success())
+#[cfg(target_os = "windows")]
+fn windows_command_message(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[cfg(target_os = "windows")]
