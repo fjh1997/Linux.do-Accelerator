@@ -39,6 +39,8 @@ pub struct AppConfig {
     pub ca_common_name: String,
     #[serde(default = "default_server_common_name")]
     pub server_common_name: String,
+    #[serde(default)]
+    pub autostart: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +183,7 @@ impl AppConfig {
                 .unwrap_or_else(default_certificate_domains),
             ca_common_name: legacy.ca_common_name,
             server_common_name: legacy.server_common_name,
+            autostart: false,
         };
 
         let serialized =

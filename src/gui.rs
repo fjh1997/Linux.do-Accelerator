@@ -21,6 +21,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use tray_icon::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
+use crate::autostart;
 use crate::branding;
 use crate::config::AppConfig;
 #[cfg(target_os = "windows")]
@@ -69,7 +70,7 @@ fn launcher_window_size() -> egui::Vec2 {
     }
 }
 
-pub fn run(config_path: PathBuf) -> Result<()> {
+pub fn run(config_path: PathBuf, auto_start: bool) -> Result<()> {
     let native_wayland_frame = use_native_wayland_frame();
     let launcher_size = launcher_window_size();
     let native_options = eframe::NativeOptions {
@@ -92,7 +93,13 @@ pub fn run(config_path: PathBuf) -> Result<()> {
     eframe::run_native(
         "Linux.do Accelerator",
         native_options,
-        Box::new(move |cc| Ok(Box::new(AcceleratorApp::new(config_path.clone(), cc)))),
+        Box::new(move |cc| {
+            Ok(Box::new(AcceleratorApp::new(
+                config_path.clone(),
+                auto_start,
+                cc,
+            )))
+        }),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
@@ -321,6 +328,8 @@ struct AcceleratorApp {
     runtime_log_modified_at: Option<SystemTime>,
     current_page: UiPage,
     logo: egui::TextureHandle,
+    autostart_enabled: bool,
+    autostart_pending: bool,
     #[cfg(target_os = "linux")]
     tray: Option<TrayState>,
     #[cfg(target_os = "linux")]
@@ -375,11 +384,12 @@ enum TrayVisibilityCommand {
 }
 
 impl AcceleratorApp {
-    fn new(config_path: PathBuf, cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(config_path: PathBuf, auto_start: bool, cc: &eframe::CreationContext<'_>) -> Self {
         install_fonts(&cc.egui_ctx);
         install_theme(&cc.egui_ctx);
 
         let config = AppConfig::load_or_create(&config_path).unwrap_or_default();
+        let autostart_enabled = autostart::is_enabled();
         let edge_node_input = config.edge_node_override().unwrap_or_default().to_string();
         let config_modified_at = file_modified_at(&config_path);
         let status = service::status(Some(config_path.clone())).unwrap_or_default();
@@ -432,6 +442,8 @@ impl AcceleratorApp {
             runtime_log_modified_at,
             current_page: UiPage::Launcher,
             logo,
+            autostart_enabled,
+            autostart_pending: auto_start,
             #[cfg(target_os = "linux")]
             tray,
             #[cfg(target_os = "linux")]
@@ -1084,6 +1096,7 @@ impl AcceleratorApp {
 
                 columns[1].spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                 self.render_config_panel(&mut columns[1]);
+                self.render_autostart_panel(&mut columns[1]);
                 self.render_project_panel(&mut columns[1]);
                 self.render_tips_panel(&mut columns[1]);
             });
@@ -1092,9 +1105,41 @@ impl AcceleratorApp {
             self.render_status_panel(ui);
             self.render_scope_panel(ui);
             self.render_config_panel(ui);
+            self.render_autostart_panel(ui);
             self.render_project_panel(ui);
             self.render_tips_panel(ui);
         }
+    }
+
+    fn render_autostart_panel(&mut self, ui: &mut egui::Ui) {
+        panel_frame(
+            egui::Color32::from_rgb(22, 26, 32),
+            egui::Color32::from_rgb(50, 56, 64),
+        )
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new("开机自启")
+                    .font(FontId::proportional(13.0))
+                    .strong()
+                    .color(egui::Color32::from_rgb(243, 179, 74)),
+            );
+            ui.add_space(6.0);
+
+            let mut enabled = self.autostart_enabled;
+            let toggle = ui.add_enabled(
+                !self.busy,
+                egui::Checkbox::new(&mut enabled, "开机自动启动加速"),
+            );
+            self.register_drag_blocker(toggle.rect);
+            if toggle.changed() {
+                self.set_autostart(enabled);
+            }
+            ui.add_space(4.0);
+            subtle_note(
+                ui,
+                "勾选后系统登录时会自动拉起本程序并申请权限启动加速；首次启动仍需要在系统弹窗中确认管理员/UAC 授权。",
+            );
+        });
     }
 
     fn render_page_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, title: &str) {
@@ -1673,6 +1718,52 @@ impl AcceleratorApp {
         }
     }
 
+    fn maybe_autostart(&mut self) {
+        if !self.autostart_pending {
+            return;
+        }
+        if self.busy || self.action_rx.is_some() {
+            return;
+        }
+        if self.status.running {
+            self.autostart_pending = false;
+            return;
+        }
+        self.autostart_pending = false;
+        self.feedback = "自动启动已请求加速...".to_string();
+        self.trigger_action(GuiAction::Start);
+    }
+
+    fn set_autostart(&mut self, enabled: bool) {
+        if enabled == self.autostart_enabled && enabled == self.config.autostart {
+            return;
+        }
+        let result = if enabled {
+            autostart::enable(&self.config_path)
+        } else {
+            autostart::disable()
+        };
+        match result {
+            Ok(()) => {
+                self.autostart_enabled = enabled;
+                self.config.autostart = enabled;
+                if let Err(error) = self.save_current_config() {
+                    self.feedback = format!("已切换开机自启，但保存配置失败: {}", format_error_chain(&error));
+                    return;
+                }
+                self.feedback = if enabled {
+                    "已开启开机自动启动加速".to_string()
+                } else {
+                    "已关闭开机自动启动加速".to_string()
+                };
+            }
+            Err(error) => {
+                self.autostart_enabled = autostart::is_enabled();
+                self.feedback = format!("修改开机自启失败: {}", format_error_chain(&error));
+            }
+        }
+    }
+
     fn ensure_launcher_viewport(&self, ctx: &egui::Context) {
         let size = launcher_window_size();
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
@@ -1703,6 +1794,8 @@ impl eframe::App for AcceleratorApp {
             self.refresh_status();
             self.last_refresh = Instant::now();
         }
+
+        self.maybe_autostart();
 
         if self.current_page == UiPage::Launcher {
             self.ensure_launcher_viewport(ctx);

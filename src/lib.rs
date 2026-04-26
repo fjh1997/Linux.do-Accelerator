@@ -1,3 +1,4 @@
+pub mod autostart;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub mod branding;
 pub mod certs;

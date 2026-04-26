@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::autostart;
 use crate::config::AppConfig;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use crate::gui;
@@ -14,6 +15,10 @@ use crate::service;
 pub struct Cli {
     #[arg(long)]
     pub config: Option<PathBuf>,
+
+    /// Launch the GUI and immediately start acceleration (used by OS auto-start entries)
+    #[arg(long)]
+    pub autostart: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -34,6 +39,10 @@ pub enum Command {
     RestoreHosts,
     UninstallCert,
     Cleanup,
+    /// Register this binary to launch automatically on user login
+    EnableAutostart,
+    /// Remove the auto-start entry for this binary
+    DisableAutostart,
     #[command(hide = true)]
     ConfigJson,
     #[command(hide = true)]
@@ -47,15 +56,17 @@ pub enum Command {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
+    let auto_start = cli.autostart;
     match cli.command {
         None | Some(Command::Gui) => {
             #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             {
                 let config_path = service::init_config(cli.config.clone())?;
-                gui::run(config_path)?;
+                gui::run(config_path, auto_start)?;
             }
             #[cfg(target_os = "android")]
             {
+                let _ = auto_start;
                 anyhow::bail!("GUI is not supported on Android yet; use CLI subcommands");
             }
         }
@@ -104,6 +115,15 @@ pub fn run(cli: Cli) -> Result<()> {
         Some(Command::Cleanup) => {
             service::cleanup(cli.config)?;
             println!("cleanup complete");
+        }
+        Some(Command::EnableAutostart) => {
+            let config_path = service::init_config(cli.config)?;
+            autostart::enable(&config_path)?;
+            println!("autostart enabled");
+        }
+        Some(Command::DisableAutostart) => {
+            autostart::disable()?;
+            println!("autostart disabled");
         }
         Some(Command::ConfigJson) => {
             let paths = service::resolve_paths(cli.config)?;
