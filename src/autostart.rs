@@ -12,7 +12,7 @@ const AUTOSTART_LABEL: &str = "io.linuxdo.accelerator";
 const AUTOSTART_DISPLAY_NAME: &str = "Linux.do Accelerator";
 #[cfg(target_os = "windows")]
 const AUTOSTART_TASK_NAME: &str = AUTOSTART_DISPLAY_NAME;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 const AUTOSTART_FLAG: &str = "--autostart";
 
 pub fn enable(config_path: &Path) -> Result<()> {
@@ -65,6 +65,7 @@ fn platform_enable(exe: &Path, config_path: &Path) -> Result<()> {
             windows_command_message(&output)
         );
     }
+    configure_windows_task_settings()?;
     remove_legacy_windows_run_entry()?;
     Ok(())
 }
@@ -156,8 +157,50 @@ fn remove_legacy_windows_run_entry() -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+fn configure_windows_task_settings() -> Result<()> {
+    use std::process::Command;
+
+    let task_name = powershell_single_quoted(AUTOSTART_TASK_NAME);
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $settings = New-ScheduledTaskSettingsSet \
+           -AllowStartIfOnBatteries \
+           -DontStopIfGoingOnBatteries \
+           -StartWhenAvailable \
+           -ExecutionTimeLimit (New-TimeSpan -Hours 72); \
+         Set-ScheduledTask -TaskName {task_name} -Settings $settings | Out-Null"
+    );
+
+    let mut command = Command::new("powershell");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        &script,
+    ]);
+    hide_windows_window(&mut command);
+    let output = command
+        .output()
+        .context("failed to invoke powershell.exe")?;
+    if !output.status.success() {
+        bail!(
+            "Set-ScheduledTask settings failed: {}",
+            windows_command_message(&output)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
 fn windows_task_action(exe: &str, config: &str) -> String {
-    format!("\"{exe}\" --config \"{config}\" helper-start")
+    format!("\"{exe}\" --config \"{config}\" {AUTOSTART_FLAG} gui")
 }
 
 #[cfg(target_os = "windows")]

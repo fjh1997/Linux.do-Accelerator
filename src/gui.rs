@@ -1137,7 +1137,7 @@ impl AcceleratorApp {
             ui.add_space(4.0);
             #[cfg(target_os = "windows")]
             let autostart_note =
-                "勾选后系统登录时会通过计划任务更早地直接启动后台加速；首次开启或关闭时需要确认一次管理员/UAC 授权，后续开机无需再次确认。";
+                "勾选后系统登录时会通过计划任务启动本程序窗口并自动请求加速；首次开启或关闭时需要确认一次管理员/UAC 授权，后续开机无需再次确认。";
             #[cfg(not(target_os = "windows"))]
             let autostart_note =
                 "勾选后系统登录时会自动拉起本程序并申请权限启动加速；首次启动仍需要在系统弹窗中确认管理员/UAC 授权。";

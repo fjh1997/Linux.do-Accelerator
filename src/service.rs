@@ -723,9 +723,10 @@ fn spawn_ui_lease_watchdog(
     shutdown_tx: watch::Sender<bool>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        match state::read_ui_lease(&paths) {
-            Ok(Some(_)) => {}
-            Ok(None) => return,
+        let stale_after = Duration::from_secs(8);
+        match active_ui_lease_exists(&paths, stale_after) {
+            Ok(true) => {}
+            Ok(false) => return,
             Err(error) => {
                 let _ = runtime_log::append(
                     &paths,
@@ -736,7 +737,6 @@ fn spawn_ui_lease_watchdog(
                 return;
             }
         }
-        let stale_after = Duration::from_secs(8);
         let mut missing_since: Option<u64> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -797,6 +797,30 @@ fn spawn_ui_lease_watchdog(
             }
         }
     })
+}
+
+fn active_ui_lease_exists(paths: &AppPaths, stale_after: Duration) -> Result<bool> {
+    let Some(lease) = state::read_ui_lease(paths)? else {
+        return Ok(false);
+    };
+
+    let now = now_ts().max(lease.updated_at);
+    let stale = now.saturating_sub(lease.updated_at) >= stale_after.as_secs();
+    let owner_dead = !is_process_running(lease.owner_pid);
+    if stale || owner_dead {
+        log_warn(
+            paths,
+            "ui-watchdog",
+            &format!(
+                "ignoring stale ui lease owner_pid={} stale={} owner_dead={}",
+                lease.owner_pid, stale, owner_dead
+            ),
+        );
+        let _ = state::clear_ui_lease(paths);
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 fn log_info(paths: &AppPaths, action: &str, message: &str) {
