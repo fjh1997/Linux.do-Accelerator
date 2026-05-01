@@ -114,18 +114,40 @@ object LinuxdoBinary {
 
     fun ensureConfigFile(context: Context): File {
         val configFile = configFile(context)
+        val markerFile = File(configFile.parentFile, "$CONFIG_NAME.version")
+        val backupFile = File(configFile.parentFile, "$CONFIG_NAME.bak")
+        val currentVersion = BuildConfig.VERSION_NAME
+
         if (configFile.exists()) {
+            val markerVersion = readVersionMarker(markerFile)
+            if (markerVersion != currentVersion) {
+                configFile.copyTo(backupFile, overwrite = true)
+                copyAsset(context, CONFIG_ASSET, configFile, overwrite = true)
+                writeVersionMarker(markerFile, currentVersion)
+            }
             return configFile
         }
 
         val legacyFile = File(context.filesDir, CONFIG_NAME)
         if (legacyFile.exists()) {
             legacyFile.copyTo(configFile, overwrite = true)
+            writeVersionMarker(markerFile, currentVersion)
             return configFile
         }
 
         copyAsset(context, CONFIG_ASSET, configFile, overwrite = false)
+        writeVersionMarker(markerFile, currentVersion)
         return configFile
+    }
+
+    private fun readVersionMarker(markerFile: File): String? {
+        if (!markerFile.exists()) return null
+        return markerFile.readText().trim().ifBlank { null }
+    }
+
+    private fun writeVersionMarker(markerFile: File, version: String) {
+        markerFile.parentFile?.mkdirs()
+        markerFile.writeText(version)
     }
 
     fun readConfig(context: Context): LinuxdoConfig = LinuxdoConfig.fromTomlFile(configFile(context))

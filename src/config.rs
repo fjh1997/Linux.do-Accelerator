@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_APP_CONFIG: &str = include_str!("../assets/defaults/linuxdo-accelerator.toml");
+const CURRENT_CONFIG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -129,6 +131,41 @@ fn legacy_network_profile_path(config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("linuxdo-network.toml"))
 }
 
+fn sibling_path(config_path: &Path, suffix: &str) -> PathBuf {
+    let mut name = config_path
+        .file_name()
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| OsString::from("linuxdo-accelerator.toml"));
+    name.push(suffix);
+    config_path
+        .parent()
+        .map(|parent| parent.join(&name))
+        .unwrap_or_else(|| PathBuf::from(&name))
+}
+
+fn version_marker_path(config_path: &Path) -> PathBuf {
+    sibling_path(config_path, ".version")
+}
+
+fn backup_config_path(config_path: &Path) -> PathBuf {
+    sibling_path(config_path, ".bak")
+}
+
+fn read_version_marker(marker_path: &Path) -> Option<String> {
+    fs::read_to_string(marker_path)
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+fn write_version_marker(marker_path: &Path) -> Result<()> {
+    fs::write(marker_path, CURRENT_CONFIG_VERSION)
+        .with_context(|| format!("failed to write {}", marker_path.display()))
+}
+
+fn marker_matches_current_version(marker_path: &Path) -> bool {
+    matches!(read_version_marker(marker_path), Some(value) if value == CURRENT_CONFIG_VERSION)
+}
+
 impl AppConfig {
     pub fn load_or_create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -136,9 +173,28 @@ impl AppConfig {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
+        let marker_path = version_marker_path(path);
+
+        if path.exists() && !marker_matches_current_version(&marker_path) {
+            let backup_path = backup_config_path(path);
+            fs::copy(path, &backup_path).with_context(|| {
+                format!(
+                    "failed to back up {} to {}",
+                    path.display(),
+                    backup_path.display()
+                )
+            })?;
+            fs::write(path, DEFAULT_APP_CONFIG)
+                .with_context(|| format!("failed to write config {}", path.display()))?;
+            write_version_marker(&marker_path)?;
+            cleanup_legacy_network_profile(path)?;
+            return Ok(default_app_config());
+        }
+
         if !path.exists() {
             fs::write(path, DEFAULT_APP_CONFIG)
                 .with_context(|| format!("failed to write config {}", path.display()))?;
+            write_version_marker(&marker_path)?;
             cleanup_legacy_network_profile(path)?;
             return Ok(default_app_config());
         }
@@ -202,6 +258,7 @@ impl AppConfig {
         if !path.exists() {
             fs::write(path, DEFAULT_APP_CONFIG)
                 .with_context(|| format!("failed to write config {}", path.display()))?;
+            write_version_marker(&version_marker_path(path))?;
         }
         cleanup_legacy_network_profile(path)?;
         Ok(())
@@ -291,7 +348,11 @@ fn cleanup_legacy_network_profile(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, DEFAULT_APP_CONFIG};
+    use super::{
+        AppConfig, CURRENT_CONFIG_VERSION, DEFAULT_APP_CONFIG, backup_config_path,
+        version_marker_path,
+    };
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -302,11 +363,13 @@ mod tests {
         let config_path = root.join("linuxdo-accelerator.toml");
         let customized = DEFAULT_APP_CONFIG.replace("127.211.73.84", "127.0.0.1");
         std::fs::write(&config_path, customized).unwrap();
+        write_current_version_marker(&config_path);
 
         let config = AppConfig::load_or_create(&config_path).unwrap();
 
         assert_eq!(config.listen_host, "127.0.0.1");
         assert_eq!(config.hosts_ip, "127.0.0.1");
+        assert!(!backup_config_path(&config_path).exists());
 
         cleanup_test_dir(&root);
     }
@@ -332,6 +395,7 @@ ca_common_name = "Linux.do Accelerator Root CA"
 server_common_name = "linux.do"
 "#;
         std::fs::write(&config_path, customized).unwrap();
+        write_current_version_marker(&config_path);
 
         let config = AppConfig::load_or_create(&config_path).unwrap();
         let reloaded = std::fs::read_to_string(&config_path).unwrap();
@@ -341,6 +405,7 @@ server_common_name = "linux.do"
         assert_eq!(config.certificate_domains, vec!["linux.do"]);
         assert_eq!(config.doh_endpoints, vec!["https://1.1.1.1/dns-query"]);
         assert_eq!(reloaded, customized);
+        assert!(!backup_config_path(&config_path).exists());
 
         cleanup_test_dir(&root);
     }
@@ -361,6 +426,7 @@ ca_common_name = "Linux.do Accelerator Root CA"
 server_common_name = "linux.do"
 "#;
         std::fs::write(&config_path, customized).unwrap();
+        write_current_version_marker(&config_path);
 
         let config = AppConfig::load_or_create(&config_path).unwrap();
         let reloaded = std::fs::read_to_string(&config_path).unwrap();
@@ -373,6 +439,74 @@ server_common_name = "linux.do"
         assert_eq!(reloaded, customized);
 
         cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn load_or_create_resets_to_defaults_on_version_mismatch_and_keeps_backup() {
+        let root = create_test_dir("upgrade-overwrite");
+        let config_path = root.join("linuxdo-accelerator.toml");
+        let legacy = r#"
+listen_host = "127.0.0.1"
+hosts_ip = "127.0.0.1"
+upstream = "https://linux.do"
+doh_endpoints = ["https://example.test/dns-query"]
+proxy_domains = ["linux.do"]
+hosts_domains = ["linux.do"]
+certificate_domains = ["linux.do"]
+ca_common_name = "Linux.do Accelerator Root CA"
+server_common_name = "linux.do"
+"#;
+        std::fs::write(&config_path, legacy).unwrap();
+        std::fs::write(version_marker_path(&config_path), "0.0.0-old").unwrap();
+
+        let config = AppConfig::load_or_create(&config_path).unwrap();
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let backup = std::fs::read_to_string(backup_config_path(&config_path)).unwrap();
+        let marker = std::fs::read_to_string(version_marker_path(&config_path)).unwrap();
+
+        assert_eq!(on_disk, DEFAULT_APP_CONFIG);
+        assert_eq!(backup, legacy);
+        assert_eq!(marker, CURRENT_CONFIG_VERSION);
+        assert_eq!(config.listen_host, "127.211.73.84");
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn load_or_create_resets_to_defaults_when_marker_is_missing() {
+        let root = create_test_dir("upgrade-no-marker");
+        let config_path = root.join("linuxdo-accelerator.toml");
+        let legacy = "listen_host = \"127.0.0.1\"\n";
+        std::fs::write(&config_path, legacy).unwrap();
+
+        let _ = AppConfig::load_or_create(&config_path).unwrap();
+
+        let on_disk = std::fs::read_to_string(&config_path).unwrap();
+        let backup = std::fs::read_to_string(backup_config_path(&config_path)).unwrap();
+        let marker = std::fs::read_to_string(version_marker_path(&config_path)).unwrap();
+        assert_eq!(on_disk, DEFAULT_APP_CONFIG);
+        assert_eq!(backup, legacy);
+        assert_eq!(marker, CURRENT_CONFIG_VERSION);
+
+        cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn load_or_create_writes_marker_on_fresh_install() {
+        let root = create_test_dir("fresh-install");
+        let config_path = root.join("linuxdo-accelerator.toml");
+
+        let _ = AppConfig::load_or_create(&config_path).unwrap();
+
+        let marker = std::fs::read_to_string(version_marker_path(&config_path)).unwrap();
+        assert_eq!(marker, CURRENT_CONFIG_VERSION);
+        assert!(!backup_config_path(&config_path).exists());
+
+        cleanup_test_dir(&root);
+    }
+
+    fn write_current_version_marker(config_path: &Path) {
+        std::fs::write(version_marker_path(config_path), CURRENT_CONFIG_VERSION).unwrap();
     }
 
     fn create_test_dir(name: &str) -> std::path::PathBuf {
