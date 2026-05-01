@@ -18,6 +18,8 @@ edge_node = ""
 proxy_domains = [
     "linux.do",
     "*.linux.do",
+    "idcflare.com",
+    "*.idcflare.com",
 ]
 
 hosts_domains = [
@@ -57,6 +59,10 @@ hosts_domains = [
     "webmail.linux.do",
     "wiki.linux.do",
     "www.linux.do",
+    "idcflare.com",
+    "www.idcflare.com",
+    "connect.idcflare.com",
+    "lottery.idcflare.com",
 ]
 
 certificate_domains = [
@@ -64,6 +70,9 @@ certificate_domains = [
     "www.linux.do",
     "*.linux.do",
     "*.s3.linux.do",
+    "idcflare.com",
+    "www.idcflare.com",
+    "*.idcflare.com",
 ]
 
 ca_common_name = "Linux.do Accelerator Root CA"
