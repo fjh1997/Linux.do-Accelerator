@@ -167,6 +167,33 @@ fn marker_matches_current_version(marker_path: &Path) -> bool {
 }
 
 impl AppConfig {
+    pub fn migrate_config_if_needed(path: &Path, cert_dir: &Path) -> Result<bool> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let marker_path = version_marker_path(path);
+        if path.exists() && marker_matches_current_version(&marker_path) {
+            return Ok(false);
+        }
+
+        let backup_path = backup_config_path(path);
+        fs::copy(path, &backup_path).with_context(|| {
+            format!(
+                "failed to back up {} to {}",
+                path.display(),
+                backup_path.display()
+            )
+        })?;
+        fs::write(path, DEFAULT_APP_CONFIG)
+            .with_context(|| format!("failed to write config {}", path.display()))?;
+        write_version_marker(&marker_path)?;
+        crate::certs::clear_server_certs(cert_dir);
+        cleanup_legacy_network_profile(path)?;
+        Ok(true)
+    }
+
     pub fn load_or_create(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)

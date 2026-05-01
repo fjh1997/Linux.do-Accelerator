@@ -26,6 +26,18 @@ pub fn ensure_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundl
     generate_bundle(config, root, false)
 }
 
+pub fn clear_server_certs(root: &Path) {
+    for name in [
+        "linuxdo-accelerator-server.crt",
+        "linuxdo-accelerator-server.key",
+    ] {
+        let path = root.join(name);
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
 pub fn load_or_create_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundle> {
     generate_bundle(config, root, false)
 }
