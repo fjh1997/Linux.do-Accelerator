@@ -48,6 +48,13 @@ struct AppState {
     resolve_cache: RwLock<HashMap<ResolveCacheKey, CachedResolvedUpstream>>,
     doh_cache: RwLock<HashMap<DohCacheKey, CachedDohAnswers>>,
     preferred_upstream_addr: RwLock<HashMap<ResolveCacheKey, SocketAddr>>,
+    upstream_h2_pool: RwLock<HashMap<H2PoolKey, client_http2::SendRequest<Full<Bytes>>>>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct H2PoolKey {
+    host: String,
+    addr: SocketAddr,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +150,7 @@ pub async fn run_proxy(
         resolve_cache: RwLock::new(HashMap::new()),
         doh_cache: RwLock::new(HashMap::new()),
         preferred_upstream_addr: RwLock::new(HashMap::new()),
+        upstream_h2_pool: RwLock::new(HashMap::new()),
     });
     let http_state = state.clone();
     let https_state = state.clone();
@@ -482,9 +490,9 @@ async fn send_once(
     body: Bytes,
     path_and_query: &str,
 ) -> Result<UpstreamResponse> {
-    let request = build_upstream_request(request_host, method, headers, body, path_and_query)?;
-
     if upstream_scheme.eq_ignore_ascii_case("http") {
+        let request =
+            build_upstream_request(request_host, method, headers, body, path_and_query)?;
         let stream = connect_tcp(addr).await?;
         return Ok(UpstreamResponse {
             response: send_over_io(TokioIo::new(stream), request).await?,
@@ -492,18 +500,87 @@ async fn send_once(
         });
     }
 
+    let pool_key = H2PoolKey {
+        host: request_host.to_ascii_lowercase(),
+        addr,
+    };
+
+    if let Some(mut sender) = get_pooled_h2_sender(state, &pool_key).await {
+        if sender.ready().await.is_ok() {
+            let request = build_upstream_request(
+                request_host,
+                method.clone(),
+                headers.clone(),
+                body.clone(),
+                path_and_query,
+            )?;
+            match sender.send_request(request).await {
+                Ok(response) => {
+                    return Ok(UpstreamResponse {
+                        response,
+                        negotiated_protocol: "h2",
+                    });
+                }
+                Err(_) => {
+                    remove_h2_sender(state, &pool_key).await;
+                }
+            }
+        } else {
+            remove_h2_sender(state, &pool_key).await;
+        }
+    }
+
     let tls_stream = connect_tls(state, request_host, outer_sni, ech_config, addr).await?;
     let negotiated_h2 = tls_stream.get_ref().1.alpn_protocol() == Some(b"h2");
+    let request = build_upstream_request(request_host, method, headers, body, path_and_query)?;
+
     if negotiated_h2 {
+        let mut builder = client_http2::Builder::new(TokioExecutor::new());
+        builder.adaptive_window(true);
+        let (mut sender, connection) = builder
+            .handshake(TokioIo::new(tls_stream))
+            .await
+            .context("failed to initialize upstream HTTP/2 client")?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let response = sender
+            .send_request(request)
+            .await
+            .context("failed to contact upstream")?;
+        store_h2_sender(state, pool_key, sender).await;
         return Ok(UpstreamResponse {
-            response: send_over_io_http2(TokioIo::new(tls_stream), request).await?,
+            response,
             negotiated_protocol: "h2",
         });
     }
+
     Ok(UpstreamResponse {
         response: send_over_io(TokioIo::new(tls_stream), request).await?,
         negotiated_protocol: "http/1.1",
     })
+}
+
+async fn get_pooled_h2_sender(
+    state: &AppState,
+    key: &H2PoolKey,
+) -> Option<client_http2::SendRequest<Full<Bytes>>> {
+    let pool = state.upstream_h2_pool.read().await;
+    pool.get(key).cloned()
+}
+
+async fn store_h2_sender(
+    state: &AppState,
+    key: H2PoolKey,
+    sender: client_http2::SendRequest<Full<Bytes>>,
+) {
+    let mut pool = state.upstream_h2_pool.write().await;
+    pool.insert(key, sender);
+}
+
+async fn remove_h2_sender(state: &AppState, key: &H2PoolKey) {
+    let mut pool = state.upstream_h2_pool.write().await;
+    pool.remove(key);
 }
 
 fn build_upstream_request(
@@ -536,28 +613,6 @@ where
     let (mut sender, connection) = client_http1::handshake(io)
         .await
         .context("failed to initialize upstream HTTP/1.1 client")?;
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-    sender
-        .send_request(request)
-        .await
-        .context("failed to contact upstream")
-}
-
-async fn send_over_io_http2<T>(
-    io: TokioIo<T>,
-    request: Request<Full<Bytes>>,
-) -> Result<Response<Incoming>>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let mut builder = client_http2::Builder::new(TokioExecutor::new());
-    builder.adaptive_window(true);
-    let (mut sender, connection) = builder
-        .handshake(io)
-        .await
-        .context("failed to initialize upstream HTTP/2 client")?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -744,7 +799,12 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
         .into_iter()
         .map(|ip| SocketAddr::new(ip, port))
         .collect::<Vec<_>>();
-    let mut upstream = ResolvedUpstream { addrs, ech_config };
+    let upstream = ResolvedUpstream { addrs, ech_config };
+    let resolve_ttl = min_duration_options(binding_ttl, min_duration_options(addr_ttl, extra_ttl))
+        .unwrap_or(FALLBACK_RESOLVE_CACHE_TTL);
+    write_cached_upstream(state, cache_key.clone(), upstream.clone(), resolve_ttl).await;
+
+    let mut upstream = upstream;
     prioritize_preferred_upstream(state, &cache_key, &mut upstream.addrs).await;
     log_upstream_debug(
         state,
@@ -765,9 +825,6 @@ async fn resolve_upstream(state: &AppState, host: &str, port: u16) -> Result<Res
                 .unwrap_or("-")
         ),
     );
-    let resolve_ttl = min_duration_options(binding_ttl, min_duration_options(addr_ttl, extra_ttl))
-        .unwrap_or(FALLBACK_RESOLVE_CACHE_TTL);
-    write_cached_upstream(state, cache_key, upstream.clone(), resolve_ttl).await;
     Ok(upstream)
 }
 
