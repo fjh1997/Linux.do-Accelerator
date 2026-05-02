@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
@@ -41,12 +43,36 @@ fn generate_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundle>
         server_key_path: cert_dir.join("linuxdo-accelerator-server.key"),
     };
 
+    let domains_hash_path = cert_dir.join("linuxdo-accelerator-domains.sha256");
+    let current_hash = domains_hash(&config.certificate_domains);
+
+    if bundle_all_exist(&bundle) {
+        if let Ok(saved_hash) = fs::read_to_string(&domains_hash_path) {
+            if saved_hash.trim() == current_hash {
+                return Ok(bundle);
+            }
+        }
+    }
+
     remove_existing_bundle_files(&bundle)?;
 
     let ca_cert = generate_ca(config, &bundle)?;
     generate_server_cert(config, &bundle, &ca_cert)?;
 
+    fs::write(&domains_hash_path, &current_hash)
+        .with_context(|| format!("failed to write {}", domains_hash_path.display()))?;
+
     Ok(bundle)
+}
+
+fn bundle_all_exist(bundle: &CertificateBundle) -> bool {
+    bundle.ca_cert_path.exists() && bundle.server_cert_path.exists() && bundle.server_key_path.exists()
+}
+
+fn domains_hash(domains: &[String]) -> String {
+    let mut hasher = DefaultHasher::new();
+    domains.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn generate_ca(config: &AppConfig, bundle: &CertificateBundle) -> Result<Certificate> {
