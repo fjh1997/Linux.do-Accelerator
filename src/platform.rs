@@ -316,9 +316,17 @@ pub fn install_ca(ca_cert_path: &Path, common_name: &str) -> Result<()> {
 
     match std::env::consts::OS {
         "windows" => {
+            let path = ca_cert_path.to_string_lossy();
             run_command(
-                "certutil",
-                &["-f", "-addstore", "Root", &ca_cert_path.to_string_lossy()],
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "Import-Certificate -FilePath '{}' -CertStoreLocation Cert:\\LocalMachine\\Root",
+                        path
+                    ),
+                ],
             )?;
         }
         "macos" => {
@@ -470,7 +478,17 @@ fn macos_loopback_aliases(config: &AppConfig) -> Vec<String> {
 pub fn uninstall_ca(common_name: &str) -> Result<()> {
     match std::env::consts::OS {
         "windows" => {
-            run_command("certutil", &["-delstore", "Root", common_name])?;
+            let _ = run_command(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "Get-ChildItem Cert:\\LocalMachine\\Root\\* | Where-Object {{ $_.Subject -like '*{}*' }} | Remove-Item -Force",
+                        common_name
+                    ),
+                ],
+            );
         }
         "macos" => {
             let _ = run_command(
