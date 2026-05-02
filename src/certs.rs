@@ -4,7 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose,
@@ -28,8 +28,23 @@ pub fn ensure_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundl
     generate_bundle(config, root)
 }
 
-pub fn load_or_create_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundle> {
-    generate_bundle(config, root)
+pub fn load_bundle(root: &Path) -> Result<CertificateBundle> {
+    let bundle = bundle_paths(root);
+    if !bundle_all_exist(&bundle) {
+        bail!(
+            "certificate files not found in {}; run setup first",
+            root.display()
+        );
+    }
+    Ok(bundle)
+}
+
+fn bundle_paths(root: &Path) -> CertificateBundle {
+    CertificateBundle {
+        ca_cert_path: root.join("linuxdo-accelerator-root-ca.crt"),
+        server_cert_path: root.join("linuxdo-accelerator-server.crt"),
+        server_key_path: root.join("linuxdo-accelerator-server.key"),
+    }
 }
 
 fn generate_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundle> {
@@ -37,11 +52,7 @@ fn generate_bundle(config: &AppConfig, root: &Path) -> Result<CertificateBundle>
     fs::create_dir_all(&cert_dir)
         .with_context(|| format!("failed to create {}", cert_dir.display()))?;
 
-    let bundle = CertificateBundle {
-        ca_cert_path: cert_dir.join("linuxdo-accelerator-root-ca.crt"),
-        server_cert_path: cert_dir.join("linuxdo-accelerator-server.crt"),
-        server_key_path: cert_dir.join("linuxdo-accelerator-server.key"),
-    };
+    let bundle = bundle_paths(&cert_dir);
 
     let domains_hash_path = cert_dir.join("linuxdo-accelerator-domains.sha256");
     let current_hash = domains_hash(&config.certificate_domains);

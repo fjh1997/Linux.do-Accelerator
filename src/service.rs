@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Result, bail};
 use tokio::sync::watch;
 
-use crate::certs::{ensure_bundle, load_or_create_bundle};
+use crate::certs::{ensure_bundle, load_bundle};
 use crate::config::AppConfig;
 use crate::hosts::{
     apply_hosts, backup_hosts_file, remove_hosts, restore_hosts_file,
@@ -97,7 +97,7 @@ pub async fn run_foreground(config_path: Option<PathBuf>, with_setup: bool) -> R
     let bundle = if with_setup {
         ensure_bundle(&config, &paths.cert_dir)?
     } else {
-        load_or_create_bundle(&config, &paths.cert_dir)?
+        load_bundle(&paths.cert_dir)?
     };
     if with_setup {
         install_ca(&bundle.ca_cert_path, &config.ca_common_name)?;
