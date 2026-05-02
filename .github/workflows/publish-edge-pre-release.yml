@@ -22,10 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             artifact_name: linux-x64
             package_cmd: cargo packager -f deb
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             artifact_name: linux-arm64
             package_cmd: cargo packager -f deb
           - os: windows-latest
