@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs::File;
 use std::io::BufReader;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1132,7 +1132,16 @@ fn format_socket_addrs(addrs: &[SocketAddr]) -> String {
 }
 
 fn parse_https_answer(raw_rdata: &str) -> Result<HttpsServiceBinding> {
-    let bytes = parse_dns_json_hex_rdata(raw_rdata)?;
+    let raw_rdata = raw_rdata.trim();
+    let bytes = if raw_rdata.starts_with("\\#") {
+        parse_dns_json_hex_rdata(raw_rdata)?
+    } else {
+        encode_https_answer_svc_params(raw_rdata)?
+    };
+    parse_https_answer_wire(&bytes)
+}
+
+fn parse_https_answer_wire(bytes: &[u8]) -> Result<HttpsServiceBinding> {
     if bytes.len() < 3 {
         anyhow::bail!("HTTPS RR data is too short");
     }
@@ -1172,6 +1181,180 @@ fn parse_https_answer(raw_rdata: &str) -> Result<HttpsServiceBinding> {
     }
 
     Ok(binding)
+}
+
+/// Translates the SVCB/HTTPS SvcParams presentation format (RFC 9460 §2.4),
+/// e.g. `1 . alpn=h3,h2 ech=AEX+...`, into the wire format consumed by
+/// [`parse_https_answer_wire`]. Some DoH servers return this presentation
+/// format instead of the RFC 3597 `\# <length> <hex>` spelling.
+fn encode_https_answer_svc_params(raw_rdata: &str) -> Result<Vec<u8>> {
+    let mut tokens = raw_rdata.split_whitespace();
+
+    let priority: u16 = tokens
+        .next()
+        .context("missing priority in HTTPS RR presentation format")?
+        .parse()
+        .context("invalid priority in HTTPS RR presentation format")?;
+    let target_name = tokens
+        .next()
+        .context("missing target name in HTTPS RR presentation format")?;
+
+    let mut wire = Vec::new();
+    wire.extend_from_slice(&priority.to_be_bytes());
+    wire.extend_from_slice(&encode_dns_name(target_name)?);
+
+    for token in tokens {
+        let (key_text, value) = match token.split_once('=') {
+            Some((key, value)) => (key, Some(value)),
+            None => (token, None),
+        };
+        let key = parse_svcb_param_key(key_text)?;
+        let encoded = encode_svcb_param_value(key, value)?;
+        if encoded.len() > u16::MAX as usize {
+            anyhow::bail!("HTTPS RR service parameter {key} value is too long");
+        }
+        wire.extend_from_slice(&key.to_be_bytes());
+        wire.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+        wire.extend_from_slice(&encoded);
+    }
+
+    Ok(wire)
+}
+
+fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
+    if name.is_empty() || name == "." {
+        return Ok(vec![0]);
+    }
+
+    let mut wire = Vec::new();
+    for label in name.trim_end_matches('.').split('.') {
+        if label.is_empty() {
+            anyhow::bail!("invalid empty label in HTTPS RR target name {name}");
+        }
+        let label = label.as_bytes();
+        if label.len() > 63 {
+            anyhow::bail!("HTTPS RR target label is longer than 63 bytes: {name}");
+        }
+        if wire.len() + 1 + label.len() > 255 {
+            anyhow::bail!("HTTPS RR target name is longer than 255 bytes: {name}");
+        }
+        wire.push(label.len() as u8);
+        wire.extend_from_slice(label);
+    }
+    wire.push(0);
+    Ok(wire)
+}
+
+fn parse_svcb_param_key(key_text: &str) -> Result<u16> {
+    match key_text {
+        "mandatory" => Ok(0),
+        "alpn" => Ok(1),
+        "no-default-alpn" => Ok(2),
+        "port" => Ok(3),
+        "ipv4hint" => Ok(4),
+        "ech" => Ok(5),
+        "ipv6hint" => Ok(6),
+        _ => key_text
+            .strip_prefix("key")
+            .and_then(|digits| digits.parse::<u16>().ok())
+            .with_context(|| format!("unknown HTTPS RR service parameter key {key_text}")),
+    }
+}
+
+fn encode_svcb_param_value(key: u16, value: Option<&str>) -> Result<Vec<u8>> {
+    let Some(value) = value else {
+        if key == 2 {
+            return Ok(Vec::new()); // no-default-alpn carries no value
+        }
+        anyhow::bail!("HTTPS RR service parameter {key} requires a value");
+    };
+
+    let mut wire = Vec::new();
+    match key {
+        0 => {
+            // mandatory: comma-separated SvcParam keys, each encoded as u16.
+            for item in split_value_list(value) {
+                wire.extend_from_slice(&parse_svcb_param_key(item)?.to_be_bytes());
+            }
+        }
+        1 => {
+            // alpn: comma-separated ALPN identifiers, each length-prefixed.
+            for id in split_value_list(value) {
+                let id = id.as_bytes();
+                if id.is_empty() || id.len() > 255 {
+                    anyhow::bail!("invalid ALPN identifier in HTTPS RR: {id:?}");
+                }
+                wire.push(id.len() as u8);
+                wire.extend_from_slice(id);
+            }
+        }
+        2 => anyhow::bail!("no-default-alpn must not carry a value"),
+        3 => {
+            let port: u16 = value
+                .parse()
+                .with_context(|| format!("invalid port in HTTPS RR: {value}"))?;
+            wire.extend_from_slice(&port.to_be_bytes());
+        }
+        4 => {
+            for address in split_value_list(value) {
+                let address = address
+                    .parse::<Ipv4Addr>()
+                    .with_context(|| format!("invalid ipv4hint address {address}"))?;
+                wire.extend_from_slice(&address.octets());
+            }
+        }
+        5 => wire = decode_svcb_base64(value)?,
+        6 => {
+            for address in split_value_list(value) {
+                let address = address
+                    .parse::<Ipv6Addr>()
+                    .with_context(|| format!("invalid ipv6hint address {address}"))?;
+                wire.extend_from_slice(&address.octets());
+            }
+        }
+        _ => wire = decode_svcb_base64(value)?,
+    }
+
+    Ok(wire)
+}
+
+/// Splits a comma-separated SvcParam list value, ignoring commas inside
+/// double quotes, and strips surrounding whitespace/quotes from each item.
+fn split_value_list(value: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0usize;
+    let mut in_quotes = false;
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                items.push(value[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&value[start..]);
+
+    items
+        .into_iter()
+        .map(|item| item.trim().trim_matches('"'))
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// SVCB presentation values use unpadded base64 (RFC 9460 §2.2.6); tolerate
+/// both the standard and URL-safe alphabets, with or without padding.
+fn decode_svcb_base64(encoded: &str) -> Result<Vec<u8>> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+
+    STANDARD_NO_PAD
+        .decode(encoded)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(encoded))
+        .or_else(|_| STANDARD.decode(encoded))
+        .or_else(|_| URL_SAFE.decode(encoded))
+        .context("invalid base64 value in HTTPS RR SvcParam")
 }
 
 fn parse_dns_json_hex_rdata(raw_rdata: &str) -> Result<Vec<u8>> {
@@ -1422,3 +1605,95 @@ fn load_private_key(path: &std::path::Path) -> Result<PrivateKeyDer<'static>> {
         .context("failed to parse private key")?
         .ok_or_else(|| anyhow::anyhow!("private key not found in {}", path.display()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::engine::general_purpose::STANDARD_NO_PAD;
+    use base64::Engine as _;
+
+    /// Builds a minimal but structurally valid ECHConfigList so the parser
+    /// (and the ECH public-name extraction) can be exercised end to end.
+    fn sample_ech_config_list() -> Vec<u8> {
+        let public_name = b"cloudflare-ech.com";
+        let public_key = (1u8..=32).collect::<Vec<_>>();
+
+        let mut contents = Vec::new();
+        contents.push(1); // config_id
+        contents.extend_from_slice(&0x0020u16.to_be_bytes()); // kem_id: X25519
+        contents.extend_from_slice(&(public_key.len() as u16).to_be_bytes());
+        contents.extend_from_slice(&public_key);
+        contents.extend_from_slice(&4u16.to_be_bytes()); // cipher_suites length (2 x u16)
+        contents.extend_from_slice(&0x0001u16.to_be_bytes()); // kdf: HKDF-SHA256
+        contents.extend_from_slice(&0x0001u16.to_be_bytes()); // aead: AES-128-GCM
+        contents.push(255); // maximum_name_length
+        contents.push(public_name.len() as u8);
+        contents.extend_from_slice(public_name);
+
+        let mut config = Vec::new();
+        config.extend_from_slice(&0xfe0du16.to_be_bytes()); // version
+        config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+        config.extend_from_slice(&contents);
+
+        let mut list = Vec::new();
+        list.extend_from_slice(&(config.len() as u16).to_be_bytes());
+        list.extend_from_slice(&config);
+        list
+    }
+
+    #[test]
+    fn parses_rfc3597_hex_rdata() -> Result<()> {
+        let ech = sample_ech_config_list();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&1u16.to_be_bytes()); // priority
+        wire.push(0); // target name "."
+        wire.extend_from_slice(&5u16.to_be_bytes()); // ech param key
+        wire.extend_from_slice(&(ech.len() as u16).to_be_bytes());
+        wire.extend_from_slice(&ech);
+
+        let hex = format!(
+            "\\# {} {}",
+            wire.len(),
+            wire.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+        );
+        let binding = parse_https_answer(&hex)?;
+        assert_eq!(binding.priority, 1);
+        assert_eq!(binding.target_name, None);
+        assert_eq!(binding.ech_config_list.as_deref(), Some(ech.as_slice()));
+        assert_eq!(binding.ech_public_name.as_deref(), Some("cloudflare-ech.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_svc_params_presentation_format() -> Result<()> {
+        let ech = sample_ech_config_list();
+        let ech_b64 = STANDARD_NO_PAD.encode(&ech);
+        let presentation =
+            format!("1 . alpn=h3,h2 ipv4hint=104.16.132.229,104.16.133.229 ech={ech_b64}");
+        let binding = parse_https_answer(&presentation)?;
+        assert_eq!(binding.priority, 1);
+        assert_eq!(binding.target_name, None);
+        assert_eq!(binding.ech_config_list.as_deref(), Some(ech.as_slice()));
+        assert_eq!(binding.ech_public_name.as_deref(), Some("cloudflare-ech.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_svc_params_with_target_name() -> Result<()> {
+        let ech = sample_ech_config_list();
+        let ech_b64 = STANDARD_NO_PAD.encode(&ech);
+        let presentation = format!("1 edge.linux.do alpn=h2 ech={ech_b64}");
+        let binding = parse_https_answer(&presentation)?;
+        assert_eq!(binding.priority, 1);
+        assert_eq!(binding.target_name.as_deref(), Some("edge.linux.do"));
+        assert_eq!(binding.ech_config_list.as_deref(), Some(ech.as_slice()));
+        assert_eq!(binding.ech_public_name.as_deref(), Some("cloudflare-ech.com"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unparseable_https_format() {
+        assert!(parse_https_answer("this is not an HTTPS RR").is_err());
+    }
+}
+

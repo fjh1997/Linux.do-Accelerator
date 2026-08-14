@@ -5,6 +5,7 @@
 - 标题栏新增独立的“最小化到托盘”按钮（位于 `-` 与 `X` 左侧），Windows / Linux / macOS 三端均支持。点击后窗口隐藏到系统托盘（不再占用任务栏），单击托盘图标或托盘菜单“打开窗口”即可恢复。原有的 `-` 按钮恢复为常规的“最小化到任务栏/Dock”，不再自动进入托盘。
 - 新增 `idcflare.com` 及其子域的支持，与 `linux.do` 统一纳入代理、hosts 和证书管理范围。
 - macOS / Linux 新增特权辅助守护进程：首次安装时输入一次密码（macOS LaunchDaemon / Linux systemd service），之后"开始加速/停止加速"不再需要密码。辅助进程通过 Unix domain socket 与 GUI 通信；socket 连接失败时自动回退到原有的提权方式。
+- 修复部分 DoH（如私人 DoH `query-dns`）返回 HTTPS/SVCB 记录的 SvcParams 可读格式（如 `1 . alpn=h3,h2 ech=AEX+...`）时解析失败、ECH 配置为空的问题；现在同时兼容 RFC 3597 `\# <长度> <hex>` 与 RFC 9460 SvcParams 展示格式，还原 ECH 强制/可选模式的正常握手。
 
 ## v0.1.14
 
