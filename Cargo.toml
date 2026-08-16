@@ -51,6 +51,7 @@ installer-icon = "assets/icons/linuxdo.ico"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 directories = "6"
