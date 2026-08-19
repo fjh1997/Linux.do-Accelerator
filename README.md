@@ -27,7 +27,7 @@
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=fjh1997%2FLinux.do-Accelerator&type=Date)](https://www.star-history.com/#fjh1997/Linux.do-Accelerator&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=fjh1997%2FLinux.do-Accelerator&type=Date)](https://star-history.dera.page/#fjh1997/Linux.do-Accelerator&Date)
 
 ## Overview
 
