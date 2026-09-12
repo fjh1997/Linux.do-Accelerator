@@ -278,6 +278,18 @@ pub fn run_privileged_helper(config_path: Option<PathBuf>) -> Result<()> {
         "特权辅助守护进程启动，开始监听 socket",
     );
 
+    // After a reboot the previous session's state files survive. This helper
+    // has not started any proxy yet, so a leftover "running" state is always
+    // stale; reconcile it before the GUI reads it, otherwise the GUI's
+    // autostart sees a phantom running state and never starts acceleration.
+    if let Err(error) = state::refresh(&paths) {
+        log_error(
+            &paths,
+            "privileged-helper",
+            &format!("清理残留服务状态失败: {error:#}"),
+        );
+    }
+
     // Shared state: holds the running proxy's shutdown channel and join handle.
     let proxy_state: Arc<Mutex<Option<ProxyHandle>>> = Arc::new(Mutex::new(None));
     let socket = helper_ipc::socket_path();
