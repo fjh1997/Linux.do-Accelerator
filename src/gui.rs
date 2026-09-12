@@ -2619,7 +2619,23 @@ impl AcceleratorApp {
     }
 
     fn ensure_launcher_viewport(&self, ctx: &egui::Context) {
+        // Re-issuing these commands every frame makes winit emit resize events
+        // every frame, which marks the UI dirty and keeps egui repainting at
+        // full speed. Only send them when the window size actually drifted.
         let size = launcher_window_size();
+        let current = ctx.input(|input| {
+            input
+                .viewport()
+                .inner_rect
+                .map(|rect| rect.size())
+        });
+        let drifted = match current {
+            Some(current) => (current - size).length() > 1.0,
+            None => true,
+        };
+        if !drifted {
+            return;
+        }
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(size));
         ctx.send_viewport_cmd(egui::ViewportCommand::MaxInnerSize(size));
