@@ -1,5 +1,5 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -7,10 +7,22 @@ use anyhow::{Context, Result, anyhow};
 use crate::paths::AppPaths;
 use crate::platform::sync_user_ownership;
 
+/// Rotate operations.log before it grows unbounded (a few months of proxy
+/// traffic was observed reaching >100MB, which the UI then re-read on every
+/// refresh). Keep one previous generation next to the active file.
+const MAX_LOG_SIZE: u64 = 8 * 1024 * 1024;
+
 pub(crate) fn append(paths: &AppPaths, level: &str, action: &str, message: &str) -> Result<()> {
     if let Some(parent) = paths.runtime_log_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    if let Ok(metadata) = fs::metadata(&paths.runtime_log_path) {
+        if metadata.len() >= MAX_LOG_SIZE {
+            let rotated = paths.runtime_log_path.with_extension("log.1");
+            let _ = fs::rename(&paths.runtime_log_path, rotated);
+        }
     }
 
     let mut file = OpenOptions::new()
@@ -39,10 +51,29 @@ pub(crate) fn read_recent_lines(paths: &AppPaths, max_lines: usize) -> Result<Ve
         return Ok(Vec::new());
     }
 
-    let content = fs::read_to_string(&paths.runtime_log_path)
-        .with_context(|| format!("failed to read {}", paths.runtime_log_path.display()))?;
-    let mut lines = content
+    // operations.log grows without bound while the proxy runs; reading the
+    // whole file (observed at >100MB) on every UI refresh burns noticeable
+    // CPU. Seek to the tail and parse only a fixed window instead.
+    const TAIL_WINDOW: u64 = 64 * 1024;
+
+    let mut file = fs::File::open(&paths.runtime_log_path)
+        .with_context(|| format!("failed to open {}", paths.runtime_log_path.display()))?;
+    let size = file.metadata()?.len();
+    let window = size.min(TAIL_WINDOW);
+    let start = size - window;
+
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = vec![0u8; window as usize];
+    file.read_exact(&mut buf)
+        .with_context(|| format!("failed to read tail of {}", paths.runtime_log_path.display()))?;
+
+    let text = String::from_utf8_lossy(&buf);
+    // When the window starts mid-file the first line is likely a partial
+    // entry left over at the seek boundary, so skip it.
+    let skip_first = usize::from(start > 0);
+    let mut lines = text
         .lines()
+        .skip(skip_first)
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)

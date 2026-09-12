@@ -257,31 +257,59 @@ pub fn is_process_running(pid: u32) -> bool {
 
     let kill_probe = Command::new("kill").args(["-0", &pid.to_string()]).output();
 
-    match kill_probe {
-        Ok(output) if output.status.success() => {
-            // Process exists — but check if it's a zombie (already dead, just
-            // waiting for the parent to reap it).  Treat zombies as "not running"
-            // so that stop/cleanup can proceed without waiting for a kill timeout.
-            is_unix_zombie(pid)
-        }
+    let exists = match kill_probe {
+        Ok(output) if output.status.success() => true,
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("Operation not permitted") {
-                // Can't signal the process but it exists; still check zombie state.
-                return !is_unix_zombie(pid);
+                // Can't signal the process but it exists.
+                true
+            } else {
+                Command::new("ps")
+                    .args(["-p", &pid.to_string(), "-o", "pid="])
+                    .output()
+                    .ok()
+                    .map(|ps| {
+                        ps.status.success()
+                            && !String::from_utf8_lossy(&ps.stdout).trim().is_empty()
+                    })
+                    .unwrap_or(false)
             }
-
-            Command::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "pid="])
-                .output()
-                .ok()
-                .map(|ps| {
-                    ps.status.success() && !String::from_utf8_lossy(&ps.stdout).trim().is_empty()
-                })
-                .unwrap_or(false)
         }
         Err(_) => false,
+    };
+    if !exists {
+        return false;
     }
+
+    // Process exists — but check if it's a zombie (already dead, just
+    // waiting for the parent to reap it).  Treat zombies as "not running"
+    // so that stop/cleanup can proceed without waiting for a kill timeout.
+    if is_unix_zombie(pid) {
+        return false;
+    }
+
+    unix_process_is_ours(pid)
+}
+
+/// Verify the pid actually belongs to this application. After a reboot a
+/// stale pid file often points at a recycled pid owned by an unrelated
+/// process (system daemons get the low pids first), which previously made
+/// `state::refresh` resurrect a phantom "running" state and the GUI skip
+/// the autostart.
+#[cfg(unix)]
+fn unix_process_is_ours(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()
+        .map(|out| {
+            // Linux truncates comm to 15 chars ("linuxdo-acceler"); match the
+            // shared prefix so macOS full paths and Linux comms both pass.
+            let comm = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
+            comm.contains("linuxdo-acceler")
+        })
+        .unwrap_or(false)
 }
 
 /// Check if a process is a zombie (defunct) on Unix.
